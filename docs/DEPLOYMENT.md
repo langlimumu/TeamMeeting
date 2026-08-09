@@ -1,5 +1,9 @@
 # Windows 部署与运维
 
+发布快照必须同时包含 `server.py` 与 `team_loop/` 包。仓库自带的 `deploy.ps1` 已处理该目录；手工复制部署时不能只复制入口文件。
+
+约 100 人同时在线时，建议保留默认配置：`TEAM_LOOP_HTTP_MAX_WORKERS=64`、`TEAM_LOOP_HTTP_REQUEST_QUEUE_SIZE=256`、`TEAM_LOOP_SQLITE_BUSY_TIMEOUT_MS=15000`。数据库应位于本机 SSD，并通过 Nginx 复用客户端连接；不要把 SQLite 文件放在网络共享盘。
+
 ## 1. 环境要求
 
 - Windows 10/11 或 Windows Server；
@@ -116,6 +120,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Sto
 | `TEAM_LOOP_ENV` | `development`、`gray` 或 `production` |
 | `TEAM_LOOP_RELEASE` | 健康接口显示的发布版本 |
 | `TEAM_LOOP_SSO_CLIENT_SECRET` | OAuth2 Client Secret，推荐使用环境变量而非写入数据库 |
+| `TEAM_LOOP_SSO_HTTP_POOL_SIZE` | 每个身份平台 Origin 的最大复用连接数，默认 32 |
+| `TEAM_LOOP_SSO_HTTP_TIMEOUT_SECONDS` | SSO 建连、响应和连接池等待超时，默认 12 秒 |
+| `TEAM_LOOP_SSO_HTTP_IDLE_SECONDS` | SSO 空闲连接保留时间，默认 60 秒 |
+| `TEAM_LOOP_SSO_DISCOVERY_CACHE_SECONDS` | OIDC Discovery 缓存时间，默认 300 秒，设为 0 可禁用 |
 | `TEAM_LOOP_TRUST_PROXY` | 设为 `1` 后，仅信任来自本机代理的 `X-Forwarded-For/Proto`；Nginx 部署必须启用 |
 | `TEAM_LOOP_REQUIRE_HTTPS` | 设为 `1` 后，拒绝没有可信 HTTPS 标记的登录及所有写请求；正式部署脚本自动启用 |
 
@@ -142,6 +150,8 @@ python server.py --host 0.0.0.0 --port 8000
 所有 SSO 配置都可用 `TEAM_LOOP_<配置键大写>` 环境变量覆盖。常用项包括 `TEAM_LOOP_SSO_MODE`、`TEAM_LOOP_SSO_ISSUER_URL`、`TEAM_LOOP_SSO_AUTHORIZATION_URL`、`TEAM_LOOP_SSO_TOKEN_URL`、`TEAM_LOOP_SSO_USERINFO_URL`、`TEAM_LOOP_SSO_CLIENT_ID`、`TEAM_LOOP_SSO_CLIENT_SECRET`、`TEAM_LOOP_SSO_REDIRECT_URI`、`TEAM_LOOP_SSO_USERNAME_CLAIM` 和 `TEAM_LOOP_SSO_AUTO_LOGIN`。管理员已知三个地址时，在系统配置中选择“手动 OAuth2”，依次填写“OAuth2 认证地址、Access Token 地址、UserInfo 地址”；界面文案变化不会改变这些环境变量键。
 
 生产 SSO 必须通过 HTTPS 域名访问，反向代理需原样转发 Cookie 和 `/api/sso/*`。身份平台和 Team Loop 服务器时间应保持同步。项目优先使用系统安装的 Python 3.10+；若运行时缺少可用的 TLS/OpenSSL，OAuth2 HTTPS 请求将无法工作。
+
+SSO 的 Discovery、Token 和 UserInfo 请求默认复用按身份平台域名隔离的连接池。连接池会读取 Windows/进程代理配置；HTTPS 身份平台可通过常见的 HTTP 企业代理建立 CONNECT 隧道，`NO_PROXY` 继续生效。约 100 人同时使用时建议先保留每个 Origin 32 条连接；只有身份平台响应稳定且监控确认池等待明显时才上调，最大值受限为 128。修改连接参数后运行 `python scripts\sso_pool_smoke_test.py`。
 
 ### 9.1 华为云 OneAccess / IDaaS
 

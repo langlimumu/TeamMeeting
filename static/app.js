@@ -14,6 +14,8 @@ const state = {
   momentYear: "",
   momentKeyword: "",
   editingMomentId: null,
+  activeMomentGalleryId: null,
+  activeMomentImageIndex: 0,
   forumCategory: "all",
   forumSearch: "",
   forumSort: "recent",
@@ -1591,13 +1593,18 @@ function renderMorningBoard() {
 }
 
 function canEditMorningItem(item) {
-  return canOperate("morning", "edit") && !state.morningReadOnly && (isAdminView() || Number(item.owner_id) === Number(state.user?.id));
+  return canOperate("morning", "edit")
+    && !state.morningReadOnly
+    && !item.retained_from_previous_workday
+    && (isAdminView() || Number(item.owner_id) === Number(state.user?.id));
 }
 
 function renderMorningItem(item) {
   const [statusLabel, statusClass] = morningStatusMeta[item.status] || morningStatusMeta.todo;
   const canEdit = canEditMorningItem(item);
-  const durationText = `${compactDate(item.start_date || item.item_date)}起 · ${Number(item.duration_days || 1)}天`;
+  const durationText = item.retained_from_previous_workday
+    ? `上个工作日完成 · ${compactDate(item.retained_from_date || item.item_date)}`
+    : `${compactDate(item.start_date || item.item_date)}起 · ${Number(item.duration_days || 1)}天`;
   const dueText = item.due_date ? `${isMorningDue(item) ? "到期需处理" : "到期"} ${shortDate(item.due_date)}` : "未设到期";
   const riskText = item.blocker ? item.blocker : (item.status === "risk" ? "请补充风险说明" : "暂无风险");
   return `
@@ -1646,7 +1653,7 @@ function renderMorningItem(item) {
         </div>
         <div class="morning-item-actions">
           <button class="secondary morning-history-btn" type="button" data-morning-history-id="${item.id}">进展</button>
-          <span class="pill">${state.morningReadOnly ? "历史只读" : "只读"}</span>
+          <span class="pill">${item.retained_from_previous_workday ? "昨日完成回顾" : state.morningReadOnly ? "历史只读" : "只读"}</span>
         </div>
       `}
     </article>
@@ -5674,10 +5681,9 @@ function momentImagesMarkup(moment) {
   if (!images.length) {
     return `<div class="moment-image-empty" aria-hidden="true"><span>◈</span><strong>${escapeHtml(momentMeta(moment).label)}</strong></div>`;
   }
-  const visible = images.slice(0, 3);
+  const visible = images.slice(0, 4);
   return `<div class="moment-image-stack count-${visible.length}">
-    ${visible.map((image, index) => `<a href="${escapeHtml(image.url)}" target="_blank" rel="noopener" title="查看原图"><img src="${escapeHtml(image.url)}" alt="${escapeHtml(moment.title)} 图片 ${index + 1}" loading="lazy"></a>`).join("")}
-    ${images.length > 3 ? `<span class="moment-image-more">+${images.length - 3}</span>` : ""}
+    ${visible.map((image, index) => `<button class="moment-gallery-trigger" type="button" data-moment-gallery-id="${moment.id}" data-moment-gallery-index="${index}" aria-label="查看${escapeHtml(moment.title)}第 ${index + 1} 张图片"><img src="${escapeHtml(image.url)}" alt="${escapeHtml(moment.title)} 图片 ${index + 1}" loading="lazy">${index === 3 && images.length > 4 ? `<span class="moment-image-more">查看全部 ${images.length} 张</span>` : ""}</button>`).join("")}
   </div>`;
 }
 
@@ -5688,9 +5694,9 @@ function momentActionsMarkup(moment) {
   return edit || remove ? `<div class="moment-actions">${edit}${remove}</div>` : "";
 }
 
-function momentCardMarkup(moment, timeline = false) {
+function momentCardMarkup(moment, timeline = false, featured = false) {
   const meta = momentMeta(moment);
-  return `<article class="moment-card ${timeline ? "timeline-card" : ""}" data-tone="${meta.tone}">
+  return `<article class="moment-card ${timeline ? "timeline-card" : ""} ${featured ? "moment-featured" : ""}" data-tone="${meta.tone}">
     ${momentImagesMarkup(moment)}
     <div class="moment-card-body">
       <div class="moment-card-kicker"><span class="moment-category">${escapeHtml(meta.label)}</span><time>${escapeHtml(shortDate(moment.event_date))}</time></div>
@@ -5723,10 +5729,27 @@ function renderMomentYearFilter() {
   select.innerHTML = `<option value="">全部年份</option>${years.map((year) => `<option value="${year}" ${state.momentYear === year ? "selected" : ""}>${year} 年</option>`).join("")}`;
 }
 
+function renderMomentSummary() {
+  const summary = $("#momentSummary");
+  if (!summary) return;
+  const currentYear = String(new Date().getFullYear());
+  const imageCount = state.moments.reduce((total, moment) => total + (moment.images || []).length, 0);
+  const currentYearCount = state.moments.filter((moment) => String(moment.event_date || "").startsWith(currentYear)).length;
+  const teams = new Set(state.moments.map((moment) => moment.org_unit_name).filter(Boolean)).size;
+  const metrics = [
+    [state.moments.length, "关键时刻"],
+    [currentYearCount, `${currentYear} 年新增`],
+    [imageCount, "珍贵影像"],
+    [teams || (state.moments.length ? 1 : 0), "参与团队"],
+  ];
+  summary.innerHTML = metrics.map(([value, label]) => `<div class="moment-summary-item"><strong>${value}</strong><span>${escapeHtml(label)}</span></div>`).join("");
+}
+
 function renderMoments() {
   const list = $("#momentList");
   if (!list) return;
   const moments = filteredMoments();
+  renderMomentSummary();
   $("#momentResultCount").textContent = `共 ${moments.length} 个时刻`;
   $$('[data-moment-view]').forEach((button) => {
     const active = button.dataset.momentView === state.momentView;
@@ -5742,7 +5765,61 @@ function renderMoments() {
     list.innerHTML = moments.map((moment) => `<div class="moment-timeline-row"><div class="moment-timeline-date"><strong>${escapeHtml(compactDate(moment.event_date))}</strong><span>${escapeHtml(momentMeta(moment).label)}</span></div><span class="moment-timeline-dot" data-tone="${escapeHtml(momentMeta(moment).tone)}"></span>${momentCardMarkup(moment, true)}</div>`).join("");
     return;
   }
-  list.innerHTML = moments.map((moment) => momentCardMarkup(moment)).join("");
+  list.innerHTML = moments.map((moment, index) => momentCardMarkup(moment, false, index === 0)).join("");
+}
+
+function activeMomentGallery() {
+  return state.moments.find((moment) => Number(moment.id) === Number(state.activeMomentGalleryId));
+}
+
+function renderMomentGallery() {
+  const modal = $("#momentGalleryModal");
+  const moment = activeMomentGallery();
+  const images = moment?.images || [];
+  if (!modal || !moment || !images.length) return;
+  const imageIndex = Math.min(Math.max(Number(state.activeMomentImageIndex) || 0, 0), images.length - 1);
+  state.activeMomentImageIndex = imageIndex;
+  const image = images[imageIndex];
+  $("#momentGalleryTitle").textContent = moment.title || "团队时刻";
+  $("#momentGalleryCategory").textContent = momentMeta(moment).label;
+  $("#momentGalleryMeta").textContent = `${shortDate(moment.event_date)} · ${moment.org_unit_name || "当前团队"}`;
+  $("#momentGalleryImage").src = image.url;
+  $("#momentGalleryImage").alt = `${moment.title} 图片 ${imageIndex + 1}`;
+  $("#momentGalleryCounter").textContent = `${imageIndex + 1} / ${images.length}`;
+  $("#momentGalleryThumbs").innerHTML = images.map((item, index) => `<button type="button" data-gallery-index="${index}" class="${index === imageIndex ? "active" : ""}" aria-label="查看第 ${index + 1} 张图片" aria-pressed="${index === imageIndex ? "true" : "false"}"><img src="${escapeHtml(item.url)}" alt="" loading="lazy"></button>`).join("");
+  $$('[data-gallery-step]', modal).forEach((button) => {
+    button.classList.toggle("hidden", images.length < 2);
+  });
+}
+
+function openMomentGallery(momentId, imageIndex = 0) {
+  const modal = $("#momentGalleryModal");
+  const moment = state.moments.find((item) => Number(item.id) === Number(momentId));
+  if (!modal || !(moment?.images || []).length) return;
+  state.activeMomentGalleryId = moment.id;
+  state.activeMomentImageIndex = Number(imageIndex) || 0;
+  renderMomentGallery();
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  modal.querySelector("[data-moment-gallery-close]")?.focus();
+}
+
+function closeMomentGallery() {
+  const modal = $("#momentGalleryModal");
+  if (!modal || modal.classList.contains("hidden")) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+  state.activeMomentGalleryId = null;
+  state.activeMomentImageIndex = 0;
+}
+
+function moveMomentGallery(step) {
+  const images = activeMomentGallery()?.images || [];
+  if (images.length < 2) return;
+  state.activeMomentImageIndex = (state.activeMomentImageIndex + Number(step) + images.length) % images.length;
+  renderMomentGallery();
 }
 
 async function loadMoments() {
@@ -6043,6 +6120,26 @@ function bindEvents() {
     renderMomentImagePreview(moment, event.target.files || []);
   });
   document.addEventListener("click", (event) => {
+    const galleryTrigger = event.target.closest("[data-moment-gallery-id]");
+    if (galleryTrigger) {
+      openMomentGallery(galleryTrigger.dataset.momentGalleryId, galleryTrigger.dataset.momentGalleryIndex);
+      return;
+    }
+    const galleryStep = event.target.closest("[data-gallery-step]");
+    if (galleryStep) {
+      moveMomentGallery(galleryStep.dataset.galleryStep);
+      return;
+    }
+    const galleryThumb = event.target.closest("[data-gallery-index]");
+    if (galleryThumb) {
+      state.activeMomentImageIndex = Number(galleryThumb.dataset.galleryIndex) || 0;
+      renderMomentGallery();
+      return;
+    }
+    if (event.target.closest("[data-moment-gallery-close]") || event.target === $("#momentGalleryModal")) {
+      closeMomentGallery();
+      return;
+    }
     const viewButton = event.target.closest("[data-moment-view]");
     if (viewButton) {
       state.momentView = viewButton.dataset.momentView === "timeline" ? "timeline" : "cards";
@@ -6464,6 +6561,7 @@ function bindEvents() {
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
+      closeMomentGallery();
       closePasswordModal();
       closeUserTypePermissionModal();
       closeUserAccountModal();
@@ -6485,6 +6583,11 @@ function bindEvents() {
       closeForumDetailModal();
       closeSsoDiagnosticModal();
       closeShiftPopover();
+      return;
+    }
+    if (!$("#momentGalleryModal")?.classList.contains("hidden") && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      moveMomentGallery(event.key === "ArrowLeft" ? -1 : 1);
       return;
     }
     const shiftDay = event.target.closest?.(".shift-day");

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260808-moments-v1" />
+    <link rel="stylesheet" href="/style.css?v=20260810-moments-v2" />
   </head>
   <body>
     <div class="app-shell">
@@ -614,9 +614,10 @@
           <section id="moments" class="page">
             <section class="panel moments-panel">
               <div class="moments-head">
-                <div>
-                  <h2>团队关键事件</h2>
-                  <p>用图片和事迹记录里程碑、交付、荣誉与共同成长。</p>
+                <div class="moments-head-copy">
+                  <span class="moments-eyebrow">TEAM ACHIEVEMENTS</span>
+                  <h2>每一次突破，都值得被看见</h2>
+                  <p>记录并庆祝并肩完成的里程碑，让今天的成果成为下一次出发的底气。</p>
                 </div>
                 <div class="moments-head-actions">
                   <div class="moment-view-switch" role="group" aria-label="展示方式">
@@ -626,7 +627,9 @@
                   <button id="momentCreateButton" type="button">＋ 记录时刻</button>
                 </div>
               </div>
+              <div id="momentSummary" class="moment-summary" aria-label="团队时刻数据概览"></div>
               <div class="moments-toolbar">
+                <div class="moments-section-title"><strong>高光档案</strong><span>沿着时间回看团队共同创造的价值</span></div>
                 <select id="momentYearFilter" aria-label="按年份筛选"><option value="">全部年份</option></select>
                 <label class="moments-search"><span>⌕</span><input id="momentKeywordFilter" type="search" maxlength="80" placeholder="搜索标题、事迹或团队" /></label>
                 <span id="momentResultCount" class="moments-result-count"></span>
@@ -666,6 +669,26 @@
                   <button id="momentSubmitButton" type="submit">发布团队时刻</button>
                 </div>
               </form>
+            </div>
+          </div>
+
+          <div id="momentGalleryModal" class="modal moment-gallery-modal hidden" role="dialog" aria-modal="true" aria-labelledby="momentGalleryTitle" aria-hidden="true">
+            <div class="moment-gallery-card">
+              <div class="moment-gallery-head">
+                <div>
+                  <span id="momentGalleryCategory" class="moment-gallery-category"></span>
+                  <h2 id="momentGalleryTitle"></h2>
+                  <p id="momentGalleryMeta"></p>
+                </div>
+                <button class="moment-gallery-close" type="button" data-moment-gallery-close aria-label="关闭图片浏览" title="关闭">×</button>
+              </div>
+              <div class="moment-gallery-stage">
+                <button class="moment-gallery-nav previous" type="button" data-gallery-step="-1" aria-label="上一张图片" title="上一张">‹</button>
+                <img id="momentGalleryImage" alt="" />
+                <button class="moment-gallery-nav next" type="button" data-gallery-step="1" aria-label="下一张图片" title="下一张">›</button>
+                <span id="momentGalleryCounter" class="moment-gallery-counter"></span>
+              </div>
+              <div id="momentGalleryThumbs" class="moment-gallery-thumbs" aria-label="全部图片"></div>
             </div>
           </div>
 
@@ -1313,6 +1336,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260808-moments-v1"></script>
+    <script type="module" src="/app.js?v=20260810-moments-v2"></script>
   </body>
 </html>

@@ -2,7 +2,7 @@
 
 ## 1. 技术栈与设计目标
 
-Team Loop 是无构建步骤的单体应用：
+Team Loop 是无构建步骤的模块化单体应用：
 
 - 后端：Python 标准库 `http.server`、`sqlite3`；
 - 前端：原生 ES Module、HTML、CSS；
@@ -16,7 +16,21 @@ Team Loop 是无构建步骤的单体应用：
 
 ```text
 TeamMeeting/
-├─ server.py                    # 数据模型、迁移、认证、权限、API、静态文件服务
+├─ server.py                    # 兼容启动入口，仅组装并启动后端
+├─ team_loop/
+│  ├─ config.py                 # 路径、系统常量、权限初始值、并发参数
+│  ├─ common.py                 # 日期、JSON、密码、SQLite 连接等通用能力
+│  ├─ database.py               # 表结构、幂等迁移、种子数据、备份基础能力
+│  ├─ sso_http.py               # OAuth2/OIDC HTTPS 连接池与 Discovery 缓存
+│  ├─ permissions.py            # 模块操作权限与日期过滤
+│  ├─ http_server.py            # 有界线程 HTTP Server
+│  ├─ handler.py                # 组合各业务 Handler Mixin
+│  └─ handlers/
+│     ├─ request.py             # HTTP 协议、静态资源、路由与组织访问基础
+│     ├─ accounts.py            # 登录、SSO、用户类型、组织、用户和成员
+│     ├─ collaboration.py       # 团队时刻、讨论区、早例会和流程中心
+│     ├─ operations.py          # 红黑榜、会议、链接、排班和 Thank You
+│     └─ system.py              # 回收站、归档、备份、配置和审计
 ├─ static/
 │  ├─ index.html                # 页面骨架、表单、弹窗
 │  ├─ app.js                    # 前端状态、渲染、接口调用、交互绑定
@@ -41,8 +55,8 @@ TeamMeeting/
 ## 3. 请求生命周期
 
 1. 浏览器通过 `static/app.js` 的 `api()` 发起请求。
-2. `server.py` 的 `Handler` 解析路径、方法和 JSON。
-3. `route_module()` 将业务接口映射到模块权限。
+2. `team_loop.handlers.request.RequestHandlerMixin` 解析路径、方法和 JSON。
+3. `module_for_path()` 将业务接口映射到模块权限。
 4. 公开接口直接执行；受保护接口先读取会话并校验模块及操作权限。
 5. 业务方法通过 `connect()` 访问 SQLite。
 6. 写操作调用 `write_audit()` 记录审计日志。
@@ -60,7 +74,7 @@ TeamMeeting/
 2. 在 `static/app.js` 的 `pages` 增加导航配置；
 3. 为模块增加 `loadXxx()` 和 `renderXxx()`；
 4. 在 `refreshPageData()` 的 loader 映射中注册；
-5. 在 `server.py` 的 `MODULE_CATALOG`、初始类型权限和 `module_for_path()` 中注册；
+5. 在 `team_loop/config.py` 的 `MODULE_CATALOG`、初始类型权限，以及 `team_loop/handlers/request.py` 的 `module_for_path()` 中注册；
 6. 访客范围由数据库中的 `guest` 权限模板控制，不要另加前端硬编码白名单。
 
 团队时刻是新增模块的完整参考：`team_moments` 与 `team_moment_images` 使用独立表，列表读取允许祖先组织只读透传，写入调用 `require_team_moment_access(..., write=True)` 限制在原组织。图片接口在 JSON 路由前单独输出二进制，但仍必须执行会话、模块和组织权限校验。修改该模块后运行 `python scripts/team_moments_smoke_test.py`。
@@ -97,7 +111,7 @@ TeamMeeting/
 
 ### 路由
 
-路由集中在 `Handler` 的 API 分发区域。推荐形式：
+路由集中在 `team_loop/handlers/request.py` 的 API 分发区域，业务实现放进对应领域 Mixin。推荐形式：
 
 ```python
 if path == "/api/example":
@@ -125,7 +139,7 @@ if path == "/api/example":
 
 登录会话持久化在 SQLite 中，只保存令牌摘要。新增认证功能时同时考虑超时、撤销、密码修改后的其他设备退出、失败次数锁定和 401 后前端自动回到登录视图。
 
-企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。手动配置页按 OAuth2 认证地址、Access Token 地址、UserInfo 地址和应用凭据分组，但存储键继续使用 `sso_authorization_url/sso_token_url/sso_userinfo_url`，避免仅因文案调整破坏环境变量和既有数据库。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中；密码型设置留空表示保留旧值。前端发起 SSO 时把当前 `/org/...` 路径和 `view` 模块放入 `return_to`，后端必须经过 `sanitize_sso_return_to()` 后绑定到 `sso_login_states`，回调不得直接信任浏览器或身份平台传回的跳转地址。登录成功和失败都通过已保存目标返回；用户无权访问原组织或模块时由现有组织与模块权限逻辑自动降级。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。SSO 群组不得直接覆盖 `org_unit_id`，只更新 `suggested_org_unit_id/sso_groups_json/sso_last_login_at`；管理员确认团队后再清空建议。修改认证链路后运行 `python scripts\sso_smoke_test.py`，验证 PKCE、原界面回跳、外部回跳拦截、已有工号关联、待分类建号、管理员归类、建议组织、敏感配置隔离和 Cookie 会话。
+企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。手动配置页按 OAuth2 认证地址、Access Token 地址、UserInfo 地址和应用凭据分组，但存储键继续使用 `sso_authorization_url/sso_token_url/sso_userinfo_url`，避免仅因文案调整破坏环境变量和既有数据库。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。`team_loop/sso_http.py` 按身份平台 Origin 维护有界 HTTP/1.1 Keep-Alive 连接池，Discovery 使用短缓存和单飞锁避免登录高峰重复握手；跨域重定向与 Token POST 重定向必须拒绝，不能把 Bearer Token 或 Client Secret 转发到未配置域名。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中；密码型设置留空表示保留旧值。前端发起 SSO 时把当前 `/org/...` 路径和 `view` 模块放入 `return_to`，后端必须经过 `sanitize_sso_return_to()` 后绑定到 `sso_login_states`，回调不得直接信任浏览器或身份平台传回的跳转地址。登录成功和失败都通过已保存目标返回；用户无权访问原组织或模块时由现有组织与模块权限逻辑自动降级。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。SSO 群组不得直接覆盖 `org_unit_id`，只更新 `suggested_org_unit_id/sso_groups_json/sso_last_login_at`；管理员确认团队后再清空建议。修改认证链路后运行 `python scripts\sso_smoke_test.py` 和 `python scripts\sso_pool_smoke_test.py`，验证业务映射、安全边界、连接复用和 Discovery 缓存。
 
 组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。成员、论坛、早例会、会议、排班、红黑榜与 Thank You 的读取和写入都必须复用组织过滤。管理员虽可切换全部组织，业务页面仍应按所选路由过滤。
 
@@ -163,7 +177,7 @@ SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只�
 
 ## 6. 数据库迁移
 
-`init_db()` 每次启动都会执行，迁移必须幂等。
+`team_loop/database.py` 的 `init_db()` 每次启动都会执行，迁移必须幂等。
 
 新增表使用 `CREATE TABLE IF NOT EXISTS`。为现有表增加字段使用：
 
@@ -177,7 +191,7 @@ ensure_column(conn, "table_name", "column_name", "TEXT")
 
 ```powershell
 python server.py --migrate-only
-python -m py_compile server.py
+python -m compileall -q server.py team_loop scripts
 python scripts\organization_scope_smoke_test.py
 ```
 
@@ -191,7 +205,7 @@ python scripts\organization_scope_smoke_test.py
 python scripts\dev_server.py --host 127.0.0.1 --port 8000
 ```
 
-它会监视 `server.py`、`static/` 和 `previews/` 中的 Python、HTML、CSS、JavaScript 与 JSON 文件。保存后后端自动重启，开发页面会轮询健康接口并刷新。
+它会监视 `server.py`、`team_loop/`、`static/` 和 `previews/` 中的 Python、HTML、CSS、JavaScript 与 JSON 文件。保存后后端自动重启，开发页面会轮询健康接口并刷新。
 
 不要让开发服务连接正式数据库进行破坏性测试。复杂数据迁移和写操作应在灰度数据库上验证。
 
@@ -200,14 +214,17 @@ python scripts\dev_server.py --host 127.0.0.1 --port 8000
 每次提交前运行：
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\process_flow_smoke_test.py scripts\sso_smoke_test.py scripts\forum_smoke_test.py scripts\team_moments_smoke_test.py scripts\proxy_smoke_test.py
+python -m compileall -q server.py team_loop scripts
 node --check static\app.js
 git diff --check
 python scripts\process_flow_smoke_test.py
 python scripts\sso_smoke_test.py
+python scripts\sso_pool_smoke_test.py
+python scripts\morning_retention_smoke_test.py
 python scripts\forum_smoke_test.py
 python scripts\team_moments_smoke_test.py
 python scripts\proxy_smoke_test.py
+python scripts\concurrency_smoke_test.py
 ```
 
 功能验证至少覆盖：
@@ -220,7 +237,8 @@ python scripts\proxy_smoke_test.py
 - 页面刷新与页面切换后的数据一致性；
 - 桌面宽屏、窄屏和手机宽度；
 - 写操作成功、失败、重复点击及空数据状态；
-- 灰度迁移、健康检查和冒烟测试。
+- 灰度迁移、健康检查和冒烟测试；
+- 100 个并发混合请求无数据库锁错误，WAL 模式和数据库完整性检查正常。
 
 安全与并发改动还应在灰度执行：
 
@@ -228,7 +246,27 @@ python scripts\proxy_smoke_test.py
 python scripts\safety_feature_test.py --base-url http://127.0.0.1:8001 --database data\deploy\gray\weekly_team_gray.db
 ```
 
-## 9. 发布边界
+## 9. 并发与容量边界
+
+当前运行时面向约 100 人同时在线、读取明显多于写入的团队协作场景：
+
+- `BoundedThreadingHTTPServer` 默认最多处理 64 个活动请求，其余请求在监听队列等待，避免瞬时请求无限创建线程；
+- SQLite 使用 WAL，让读取与单个写入可以并行；写入仍按 SQLite 规则串行；
+- 每个请求使用独立连接，启用外键、15 秒 `busy_timeout` 和 `synchronous=NORMAL`；
+- 会话最后访问时间最多每分钟更新一次，避免每个读取请求都产生写入；
+- 图片、静态资源和备份采用流式或分块传输，业务数据库不能放在网络共享盘。
+
+可通过环境变量调整：
+
+```text
+TEAM_LOOP_HTTP_MAX_WORKERS=64
+TEAM_LOOP_HTTP_REQUEST_QUEUE_SIZE=256
+TEAM_LOOP_SQLITE_BUSY_TIMEOUT_MS=15000
+```
+
+不应只为追求数字盲目增大线程数。调整后必须运行 `python scripts\concurrency_smoke_test.py`。如果实际出现持续批量写入、P95 明显超过 2 秒或频繁触发 busy timeout，应保持 HTTP/API 层不变，将数据库访问层迁移到 PostgreSQL，而不是继续放大 SQLite 锁等待。
+
+## 10. 发布边界
 
 开发完成后先执行灰度发布，在 8001 端口使用正式库快照验证。确认后再执行 `Promote`。不要把灰度数据库复制回正式数据库，也不要直接替换正在使用的 SQLite 文件。
 

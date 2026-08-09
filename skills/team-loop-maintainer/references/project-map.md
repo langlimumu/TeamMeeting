@@ -4,9 +4,13 @@
 
 | Concern | Primary location | Also inspect |
 | --- | --- | --- |
-| Tables and migrations | `server.py:init_db` | seed functions, backup verification |
-| Authentication and API routing | `server.py:Handler` | `route_module`, current-user helpers |
-| Permissions | `MODULE_CATALOG`, type defaults | `static/app.js` access helpers and navigation |
+| Tables and migrations | `team_loop/database.py:init_db` | seed functions, backup verification |
+| HTTP and API routing | `team_loop/handlers/request.py` | composed `team_loop/handler.py` |
+| Authentication, users and organizations | `team_loop/handlers/accounts.py` | SSO/database helpers, system settings |
+| Collaboration domains | `team_loop/handlers/collaboration.py` | moments, forum, morning and processes |
+| Operational domains | `team_loop/handlers/operations.py` | scores, meetings, links, shifts and thanks |
+| System operations | `team_loop/handlers/system.py` | recycle, archive, backups, settings and audit |
+| Permissions | `team_loop/config.py`, `team_loop/permissions.py` | `static/app.js` access helpers and navigation |
 | Team moments | `team_moments`, `team_moment_images`, protected image endpoint | `#moments`, card/timeline renderer and edit modal |
 | Organization tree and route scope | `org_units`, `organization_context()` | SSO group mapping, people-centered module queries, sidebar organization switcher |
 | Page markup and dialogs | `static/index.html` | render functions in `static/app.js` |
@@ -14,7 +18,7 @@
 | Visual design and responsiveness | `static/style.css` | theme overrides near the bottom |
 | Development reload | `scripts/dev_server.py` | `start_hot_server.bat` |
 | Gray/production release | `deploy.ps1` | batch wrappers, smoke and snapshot scripts |
-| Enterprise OAuth2/OIDC SSO | `server.py`, system settings, login view | Discovery/manual endpoints, PKCE, employee-ID mapping, auto login fallback, provisioning and sessions |
+| Enterprise OAuth2/OIDC SSO | `team_loop/handlers/accounts.py`, `team_loop/sso_http.py`, system settings | Connection pooling, Discovery/manual endpoints, PKCE, employee-ID mapping, auto login fallback, provisioning and sessions |
 | User and developer docs | `docs/` | `README.md`, this skill |
 
 ## Domain invariants
@@ -45,7 +49,8 @@
 
 ## High-risk areas
 
-- `server.py` is intentionally monolithic; route ordering can shadow dynamic paths.
+- `server.py` is a compatibility entry point. Domain code belongs in `team_loop/`; route ordering in `handlers/request.py` can still shadow dynamic paths.
+- SQLite supports concurrent reads through WAL but serializes writes. Keep databases on local disks, preserve bounded HTTP workers, and run the 100-request concurrency smoke test after connection or transaction changes.
 - `static/app.js` renders HTML strings; missing `escapeHtml()` creates stored-XSS risk.
 - Sessions are persisted as token hashes in SQLite; authentication changes must preserve expiry, revocation, device listing, and login throttling.
 - User types and morning items use optimistic versions; stale writes must return 409 instead of overwriting newer data.

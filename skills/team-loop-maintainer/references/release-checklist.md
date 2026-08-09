@@ -9,6 +9,7 @@
 ## Before gray
 
 - Run Python compilation, JavaScript syntax, and `git diff --check`.
+- Confirm the release snapshot contains both `server.py` and the `team_loop/` package.
 - Verify no file under `data/` is staged.
 - Confirm migrations are idempotent.
 - Confirm the gray port and production port are distinct.
@@ -24,6 +25,8 @@
 - Verify upper meetings and announcements appear read-only in descendants, ordinary discussions do not inherit, descendants can reply/react to inherited announcements, cross-team Thank You appears for both parties and common ancestors, and unrelated sibling teams cannot see it.
 - If SSO organization mapping changed, verify deepest-group matching creates a suggestion only, existing-user organizations never change during login, new users stay at root, administrators can adopt suggestions individually and in bulk, and redirect uses the current formal organization route.
 - If authentication changed, run `python scripts\sso_smoke_test.py`; confirm existing employee IDs link without duplicates, new identities are read-only pending accounts, administrator classification clears the pending state, local fallback remains available, auto login cannot loop, the original organization route and module survive SSO, external return targets are rejected, and no SSO secret or endpoint appears in `/api/me`.
+- Run `python scripts\sso_pool_smoke_test.py`; verify concurrent requests stay within the configured per-origin connection limit and concurrent Discovery calls collapse to one provider request.
+- Run `python scripts\morning_retention_smoke_test.py`; verify Friday completions remain visible on Monday and disappear on Tuesday while unfinished items continue carrying forward.
 - Verify manual SSO mode clearly groups OAuth2 authorization, Access Token and UserInfo addresses, reports missing required fields without submitting, and keeps a blank Client Secret unchanged.
 - If organization migration changed, run `python scripts\org_data_migration_test.py`; preview a gray database, confirm apply creates both backup and manifest, and verify manifest rollback restores every moved row.
 - If proxy or cookie handling changed, run `python scripts\proxy_smoke_test.py`; confirm direct HTTP login returns 426, HTTPS forwarding produces Secure cookies, and the forwarded client IP is stored. Validate Nginx with `nginx -t` before reload.
@@ -34,7 +37,8 @@
 - Verify attendance opens in a modal and meeting email generation works both with and without Thank You content.
 - Verify the local full Emoji picker loads, searches, sends an arbitrary Emoji, and can remove the reaction without external network access.
 - Run `python scripts\forum_smoke_test.py`; verify author edits, nested replies, arbitrary Emoji, announcement/pin privilege rejection, soft deletion, recycle restore, and preserved replies.
-- Run `python scripts\team_moments_smoke_test.py`; verify guest denial by default, image signature validation, protected image reads, editing, soft deletion, and recycle restore.
+- Run `python scripts\team_moments_smoke_test.py`; verify guest denial by default, six-image upload, versioned no-store protected image reads, editing, soft deletion, and recycle restore. In the UI confirm the fourth tile opens all thumbnails and arrow-key/mobile navigation works.
+- Run `python scripts\concurrency_smoke_test.py`; verify 100 mixed requests finish without lock errors, WAL is active, all writes persist, and `quick_check` is `ok`.
 - Toggle black-score summary and detail visibility independently; verify non-admin APIs and UI hide the configured data while administrators still see and can restore it.
 - Verify the score page defaults to the current month, detail rows are newest-first and scroll, and a member click opens only that member's full history.
 - Verify shared date filters default to the first day of the current month through today.

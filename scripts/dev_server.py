@@ -10,7 +10,7 @@ WATCH_SUFFIXES = {".py", ".html", ".css", ".js", ".json"}
 
 
 def file_snapshot(root: Path) -> dict[str, tuple[int, int]]:
-    paths = [root / "server.py", root / "static", root / "previews"]
+    paths = [root / "server.py", root / "team_loop", root / "static", root / "previews"]
     snapshot = {}
     for path in paths:
         candidates = [path] if path.is_file() else path.rglob("*") if path.exists() else []

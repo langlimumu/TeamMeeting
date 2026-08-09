@@ -111,7 +111,11 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 团队时刻使用独立 `moments` 模块权限。图片只允许 JPG、PNG、WebP，单张解码后最大 5 MB；浏览器请求不能绕过服务端组织范围。
 
+图片 URL 带有基于创建时间的版本参数，并返回禁止缓存响应头，避免灰度/正式数据库切换或恢复备份后复用相同图片 ID 时显示旧图。
+
 ## 5. 早例会与归档
+
+`GET /api/morning-items?date=YYYY-MM-DD` 除当天事项外，还会返回上一个工作日完成且当天没有新记录的事项。该类记录带 `retained_from_previous_workday=true` 和 `retained_from_date`，仅用于早会回顾，不能在新日期修改；响应同时给出 `retained_completed_count`。工作日当前按周一至周五计算。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |

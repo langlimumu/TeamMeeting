@@ -51,14 +51,16 @@ def request_bytes(opener, url, expected=200):
         with opener.open(request, timeout=15) as response:
             status = response.status
             content_type = response.headers.get_content_type()
+            cache_control = response.headers.get("Cache-Control", "")
             data = response.read()
     except HTTPError as exc:
         status = exc.code
         content_type = exc.headers.get_content_type()
+        cache_control = exc.headers.get("Cache-Control", "")
         data = exc.read()
     if status != expected:
         raise RuntimeError(f"GET {url} returned {status}, expected {expected}: {data[:200]!r}")
-    return content_type, data
+    return content_type, cache_control, data
 
 
 def login(base_url, username, password):
@@ -94,17 +96,24 @@ def main():
                     "story": "团队完成连续稳定运行验证，并沉淀交接标准。",
                     "category": "milestone",
                     "event_date": "2026-08-08",
-                    "images": [{"name": "milestone.png", "data_url": f"data:image/png;base64,{PIXEL_PNG}"}],
+                    "images": [
+                        {"name": f"milestone-{index}.png", "data_url": f"data:image/png;base64,{PIXEL_PNG}"}
+                        for index in range(1, 7)
+                    ],
                 },
             )
             moment = next((item for item in created.get("moments") or [] if item.get("title") == "TOPTB 稳定运行里程碑"), None)
-            if not moment or len(moment.get("images") or []) != 1:
+            if not moment or len(moment.get("images") or []) != 6:
                 raise RuntimeError(f"Team moment creation failed: {moment}")
             moment_id = moment["id"]
             image_url = moment["images"][0]["url"]
-            content_type, image_data = request_bytes(user, f"{base_url}{image_url}")
+            if "?v=" not in image_url:
+                raise RuntimeError(f"Team-moment image URL is missing a cache version: {image_url}")
+            content_type, cache_control, image_data = request_bytes(user, f"{base_url}{image_url}")
             if content_type != "image/png" or not image_data.startswith(b"\x89PNG"):
                 raise RuntimeError("Protected team-moment image response is invalid")
+            if "no-store" not in cache_control:
+                raise RuntimeError(f"Protected team-moment image must not be cached: {cache_control}")
 
             updated = request_json(
                 user,
@@ -113,7 +122,7 @@ def main():
                 {"title": "TOPTB 稳定运行 30 天", "remove_image_ids": [moment["images"][0]["id"]], "new_images": []},
             )
             moment = next((item for item in updated.get("moments") or [] if item.get("id") == moment_id), None)
-            if not moment or moment.get("images") or moment.get("title") != "TOPTB 稳定运行 30 天":
+            if not moment or len(moment.get("images") or []) != 5 or moment.get("title") != "TOPTB 稳定运行 30 天":
                 raise RuntimeError(f"Team moment update failed: {moment}")
 
             request_json(user, f"{base_url}/api/team-moments/{moment_id}", "DELETE")
@@ -124,12 +133,16 @@ def main():
             recycle_item = next((item for item in recycle if item.get("entity_type") == "team_moment" and item.get("entity_id") == moment_id), None)
             if not recycle_item:
                 raise RuntimeError("Deleted team moment was not added to recycle bin")
-            request_json(admin, f"{base_url}/api/recycle-bin/{recycle_item['id']}/restore", "POST", {})
+            try:
+                request_json(admin, f"{base_url}/api/recycle-bin/{recycle_item['id']}/restore", "POST", {})
+            except ConnectionResetError:
+                # Windows may reset a just-closed test socket after the restore commit.
+                pass
             restored = request_json(user, f"{base_url}/api/team-moments").get("moments") or []
             if not any(item.get("id") == moment_id for item in restored):
                 raise RuntimeError("Team moment restore failed")
 
-            print(json.dumps({"status": "ok", "moment_id": moment_id, "image_protected": True, "recycle_restore": True}, ensure_ascii=False))
+            print(json.dumps({"status": "ok", "moment_id": moment_id, "six_images": True, "image_protected": True, "recycle_restore": True}, ensure_ascii=False))
         finally:
             server.shutdown()
             thread.join(timeout=5)

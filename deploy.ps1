@@ -80,7 +80,7 @@ function New-Release {
     $releasePath = Join-Path $ReleaseRoot $releaseId
     New-Item -ItemType Directory -Force -Path $releasePath | Out-Null
     Copy-Item -LiteralPath (Join-Path $Root "server.py") -Destination $releasePath
-    foreach ($folder in @("static", "previews")) {
+    foreach ($folder in @("team_loop", "static", "previews")) {
         $source = Join-Path $Root $folder
         if (Test-Path -LiteralPath $source) {
             Copy-Item -LiteralPath $source -Destination $releasePath -Recurse

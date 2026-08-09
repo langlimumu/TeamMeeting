@@ -40,7 +40,7 @@ Use these references conditionally:
 ### Permissions
 
 - Treat frontend visibility as presentation only.
-- Enforce admin, ownership, module, and action permissions in `server.py`.
+- Enforce admin, ownership, module, and action permissions in the relevant `team_loop/handlers/` domain module.
 - Register new modules in `MODULE_CATALOG`, initial permissions, `module_for_path()`, frontend `pages`, and loaders.
 - Treat user types as administrator-defined data. Never branch business behavior on a display name or assume fixed internal/partner type keys.
 - Keep module permissions separate from business participation scopes (`members`, `morning`, `rules`, `thanks`); enforce both in backend queries and writes.
@@ -54,6 +54,10 @@ Use these references conditionally:
 - Record significant writes with `write_audit()`.
 - Prefer soft deletion and recycle-bin integration for business history.
 - Add schema changes through idempotent `CREATE TABLE IF NOT EXISTS`, `ensure_column()`, and conditional updates in `init_db()`.
+- Keep `server.py` as a compatibility entry point. Put configuration in `team_loop/config.py`, migrations in `team_loop/database.py`, shared helpers in `team_loop/common.py`, and business methods in the matching Handler Mixin.
+- Preserve WAL, per-request connections, busy timeout, bounded HTTP workers, and the one-minute session-touch throttle when changing concurrency-sensitive code.
+- Preserve the bounded per-origin SSO HTTP pool, same-origin redirect protection, and Discovery cache stampede guard. Run both SSO smoke tests after changing identity-provider networking.
+- Keep completed morning items visible for exactly the next Monday-Friday workday as read-only review rows; do not create another persisted carryover row for completed work.
 - Never commit or manually overwrite files under `data/`.
 - Never test destructive migrations against the production database.
 
@@ -71,7 +75,7 @@ Use these references conditionally:
 - Keep meeting state locks enforced by the server.
 - Keep meeting creation controlled by `meetings.create`, while first-level topic categories and second-level preset maintenance remain administrator-only.
 - Keep the forum-style team discussion area searchable and paginated; enforce author/admin edit, announcement, pin, soft-delete, and restore boundaries in the backend.
-- Keep Team Moments isolated under the `moments` module. Store image bytes in `team_moment_images`, validate MIME signatures and limits, inherit ancestor moments downward as read-only, and cover create/image/update/delete/restore with `scripts/team_moments_smoke_test.py`.
+- Keep Team Moments isolated under the `moments` module. Store image bytes in `team_moment_images`, validate MIME signatures and limits, inherit ancestor moments downward as read-only, and expose every retained image through the four-tile gallery and keyboard/mobile lightbox. Version protected image URLs and return no-store headers so database restore or gray/production switching cannot reuse stale image IDs. Cover six-image create/read/update/delete/restore and cache headers with `scripts/team_moments_smoke_test.py`.
 - Keep local AI knowledge-base dependencies in a separate service boundary. Reuse Team Loop identity and organization claims, enforce vector-store payload filters before retrieval, require source citations, and follow `docs/KNOWLEDGE_BASE.md` before adding model or vector-database dependencies.
 - Keep the full discussion Emoji picker and Chinese data local under `static/vendor/`; do not introduce a CDN dependency.
 - Keep Thank You weekly limits and red/black independent scoring semantics.
@@ -84,12 +88,15 @@ Use these references conditionally:
 Run at minimum:
 
 ```powershell
-python -m py_compile server.py scripts\dev_server.py scripts\db_snapshot.py scripts\smoke_test.py scripts\safety_feature_test.py scripts\process_flow_smoke_test.py scripts\sso_smoke_test.py scripts\organization_scope_smoke_test.py scripts\forum_smoke_test.py scripts\proxy_smoke_test.py
+python -m compileall -q server.py team_loop scripts
 python scripts\process_flow_smoke_test.py
 python scripts\organization_scope_smoke_test.py
 python scripts\sso_smoke_test.py
+python scripts\sso_pool_smoke_test.py
+python scripts\morning_retention_smoke_test.py
 python scripts\forum_smoke_test.py
 python scripts\proxy_smoke_test.py
+python scripts\concurrency_smoke_test.py
 node --check static\app.js
 git diff --check
 ```

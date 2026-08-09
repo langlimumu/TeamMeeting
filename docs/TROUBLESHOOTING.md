@@ -31,7 +31,15 @@ Get-NetTCPConnection -LocalPort 8000 -State Listen
 - 正式/灰度环境不会读取工作区代码，必须重新执行 Gray 或 Promote；
 - 浏览器执行强制刷新；
 - 检查开发终端是否因语法错误反复重启；
-- 运行 `node --check static\app.js` 和 `python -m py_compile server.py`。
+- 运行 `node --check static\app.js` 和 `python -m compileall -q server.py team_loop scripts`。
+
+## 并发访问出现 database is locked
+
+1. 确认数据库位于服务器本地磁盘，不在 SMB/NAS/同步盘。
+2. 执行 `python server.py --migrate-only`，再用 SQLite 检查 `PRAGMA journal_mode` 应为 `wal`。
+3. 运行 `python scripts\concurrency_smoke_test.py`，确认 100 个混合请求可完成。
+4. 查看是否有外部程序长期打开写事务，或管理员正在执行恢复、迁移等独占操作。
+5. 可适度增加 `TEAM_LOOP_SQLITE_BUSY_TIMEOUT_MS`，但若持续大量写入，应迁移到 PostgreSQL，不能靠无限延长等待掩盖容量问题。
 
 ## 灰度发布提示数据库被占用
 
@@ -59,6 +67,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 - 登录页没有 SSO 按钮：自动发现模式检查 Issuer 与 Client ID；手动模式检查授权、Token、UserInfo 三个地址与 Client ID；
 - 提示回调不一致：企业身份平台登记值必须与“OAuth2 回调地址”逐字一致；
 - 提示无法连接身份平台：检查服务器 DNS、代理、防火墙、HTTPS 证书和系统时间；
+- 高峰期提示 `SSO connection pool is busy`：先检查身份平台 Token/UserInfo 延迟和服务端出口网络，再按实际容量适度增加 `TEAM_LOOP_SSO_HTTP_POOL_SIZE`；不要直接设置为无限连接；
 - 登录后回到系统账号页：页面会在 SSO 失败后主动停止循环跳转，先查看页面错误提示和服务日志，修复后点击“企业 SSO 登录”重试；
 - 提示工号缺失或关联冲突：核对“SSO 工号字段”和 UserInfo 返回值，并在“用户管理”确认工号唯一；
 - 提示 Access Token 或 UserInfo 请求失败：错误会标明失败阶段、HTTP 状态和身份平台返回的安全错误说明；依次检查 Client Secret、Scope、回调地址、服务器 DNS/代理和出口防火墙；

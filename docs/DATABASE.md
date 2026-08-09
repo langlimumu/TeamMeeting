@@ -1,5 +1,13 @@
 # 数据库、备份与恢复
 
+## 并发连接策略
+
+应用启动时将数据库切换到 WAL 模式，并设置 `wal_autocheckpoint=1000`。每个 HTTP 请求使用独立 SQLite 连接，连接启用外键、`synchronous=NORMAL` 和默认 15 秒忙等待。该组合适合约 100 人同时在线且读多写少的使用方式，但 SQLite 同一时刻仍只有一个写入者。
+
+数据库、`-wal` 与 `-shm` 文件必须位于服务器本地磁盘。不要将正在运行的数据库放到 SMB、NAS、网盘同步目录或多台服务器共享目录。备份继续使用 SQLite Backup API，以获得包含 WAL 数据的一致性快照。
+
+并发策略可通过 `TEAM_LOOP_SQLITE_BUSY_TIMEOUT_MS` 调整；修改后运行 `python scripts\concurrency_smoke_test.py`，确认 100 个混合请求无锁错误且 `PRAGMA quick_check` 返回 `ok`。
+
 ## 1. 数据文件
 
 默认正式数据库：
