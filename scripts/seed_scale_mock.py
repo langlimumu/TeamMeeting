@@ -529,11 +529,23 @@ def seed_scores(conn: sqlite3.Connection, users: list[sqlite3.Row], rng: random.
 
 def seed_meetings(conn: sqlite3.Connection, users: list[sqlite3.Row], rng: random.Random, today: dt.date, admin_id: int) -> tuple[int, int, int]:
     orgs = conn.execute("SELECT id,name FROM org_units WHERE active=1 ORDER BY id").fetchall()
-    types = conn.execute("SELECT id,name FROM meeting_topic_types WHERE active=1 ORDER BY sort_order,id").fetchall()
-    options = conn.execute("SELECT id,type_id,title,duration_minutes FROM meeting_topic_options WHERE active=1 ORDER BY type_id,sort_order,id").fetchall()
     meeting_count = item_count = attendance_count = 0
     for index in range(36):
         org = orgs[index % len(orgs)]
+        types = conn.execute(
+            "SELECT id,name FROM meeting_topic_types WHERE active=1 AND org_unit_id=? ORDER BY sort_order,id",
+            (org["id"],),
+        ).fetchall()
+        options = conn.execute(
+            """
+            SELECT o.id,o.type_id,o.title,o.duration_minutes
+            FROM meeting_topic_options o
+            JOIN meeting_topic_types t ON t.id=o.type_id
+            WHERE o.active=1 AND t.active=1 AND t.org_unit_id=?
+            ORDER BY o.type_id,o.sort_order,o.id
+            """,
+            (org["id"],),
+        ).fetchall()
         meeting_day = today - dt.timedelta(days=(35 - index) * 7)
         status = "completed" if meeting_day < today else "scheduled"
         creator = users[(index * 7) % len(users)]
@@ -598,14 +610,21 @@ def seed_meetings(conn: sqlite3.Connection, users: list[sqlite3.Row], rng: rando
 
 
 def seed_shifts(conn: sqlite3.Connection, users: list[sqlite3.Row], today: dt.date, admin_id: int) -> tuple[int, int]:
-    machine_ids = []
-    for index in range(8):
-        cursor = conn.execute(
-            "INSERT INTO machines(name,description) VALUES(?,?)",
-            (f"MOCK-{index + 1:02d}", f"{MOCK_PREFIX} 用于 100 人规模预览的测试机台"),
-        )
-        machine_ids.append(cursor.lastrowid)
     participants = [user for user in users if user["username"].startswith(USERNAME_PREFIX)]
+    participants_by_org = {}
+    for user in participants:
+        participants_by_org.setdefault(user["org_unit_id"], []).append(user)
+    machines_by_org = {}
+    machine_sequence = 0
+    for org_unit_id in sorted(participants_by_org):
+        machines_by_org[org_unit_id] = []
+        for _ in range(2):
+            machine_sequence += 1
+            cursor = conn.execute(
+                "INSERT INTO machines(org_unit_id,name,description) VALUES(?,?,?)",
+                (org_unit_id, f"MOCK-{machine_sequence:02d}", f"{MOCK_PREFIX} 用于 100 人规模预览的测试机台"),
+            )
+            machines_by_org[org_unit_id].append(cursor.lastrowid)
     first = today.replace(day=1)
     next_month = (first + dt.timedelta(days=32)).replace(day=1)
     end = (next_month + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
@@ -613,14 +632,16 @@ def seed_shifts(conn: sqlite3.Connection, users: list[sqlite3.Row], today: dt.da
     current = first
     day_index = 0
     while current <= end:
-        for machine_index, machine_id in enumerate(machine_ids):
-            for shift_index, shift_type in enumerate(("day", "night")):
-                user = participants[(day_index * 17 + machine_index * 5 + shift_index) % len(participants)]
-                conn.execute(
-                    "INSERT INTO shifts(machine_id,user_id,shift_type,shift_date,hours,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                    (machine_id, user["id"], shift_type, date_iso(current), 12, f"{MOCK_PREFIX} 月度排班", admin_id, now_iso()),
-                )
-                shift_count += 1
+        for org_unit_id, machine_ids in machines_by_org.items():
+            org_participants = participants_by_org[org_unit_id]
+            for machine_index, machine_id in enumerate(machine_ids):
+                for shift_index, shift_type in enumerate(("day", "night")):
+                    user = org_participants[(day_index * 17 + machine_index * 5 + shift_index) % len(org_participants)]
+                    conn.execute(
+                        "INSERT INTO shifts(machine_id,user_id,shift_type,shift_date,hours,note,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (machine_id, user["id"], shift_type, date_iso(current), 12, f"{MOCK_PREFIX} 月度排班", admin_id, now_iso()),
+                    )
+                    shift_count += 1
         current += dt.timedelta(days=1)
         day_index += 1
     return len(machine_ids), shift_count

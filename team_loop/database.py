@@ -7,8 +7,8 @@ def ensure_column(conn, table, column, definition):
 
 
 def seed_meeting_topics(conn):
-    count = conn.execute("SELECT COUNT(*) FROM meeting_topic_types").fetchone()[0]
-    if count:
+    units = conn.execute("SELECT id FROM org_units WHERE active=1 ORDER BY sort_order, id").fetchall()
+    if not units:
         return
     defaults = [
         ("进度同步", "#3370ff", ["本周完成", "下周计划", "里程碑风险"]),
@@ -16,17 +16,24 @@ def seed_meeting_topics(conn):
         ("技术复盘", "#00b578", ["故障案例", "经验沉淀", "标准优化"]),
         ("行动项", "#ff8f1f", ["待办分配", "截止确认", "关闭验收"]),
     ]
-    for index, (name, color, options) in enumerate(defaults, start=1):
-        cursor = conn.execute(
-            "INSERT INTO meeting_topic_types(name, color, sort_order, active) VALUES(?,?,?,1)",
-            (name, color, index),
-        )
-        type_id = cursor.lastrowid
-        for option_index, title in enumerate(options, start=1):
-            conn.execute(
-                "INSERT INTO meeting_topic_options(type_id, title, default_detail, sort_order, active) VALUES(?,?,?,?,1)",
-                (type_id, title, "", option_index),
+    for unit in units:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM meeting_topic_types WHERE org_unit_id=?",
+            (unit["id"],),
+        ).fetchone()[0]
+        if count:
+            continue
+        for index, (name, color, options) in enumerate(defaults, start=1):
+            cursor = conn.execute(
+                "INSERT INTO meeting_topic_types(org_unit_id, name, color, sort_order, active) VALUES(?,?,?,?,1)",
+                (unit["id"], name, color, index),
             )
+            type_id = cursor.lastrowid
+            for option_index, title in enumerate(options, start=1):
+                conn.execute(
+                    "INSERT INTO meeting_topic_options(type_id, title, default_detail, sort_order, active) VALUES(?,?,?,?,1)",
+                    (type_id, title, "", option_index),
+                )
 
 
 def seed_link_categories(conn):
@@ -348,6 +355,188 @@ def migrate_team_moments_permissions(conn):
         "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
         (migration_key, now_iso()),
     )
+
+
+def migrate_team_scoped_meeting_topics(conn):
+    migration_key = "team_scoped_meeting_topics_v1"
+    if conn.execute("SELECT key FROM schema_migrations WHERE key=?", (migration_key,)).fetchone():
+        return
+    root = conn.execute(
+        "SELECT id FROM org_units WHERE active=1 AND parent_id IS NULL ORDER BY sort_order, id LIMIT 1"
+    ).fetchone()
+    if not root:
+        return
+    root_id = root["id"]
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(meeting_topic_types)").fetchall()}
+    table_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='meeting_topic_types'"
+    ).fetchone()
+    needs_rebuild = "org_unit_id" not in columns or "name TEXT NOT NULL UNIQUE" in str((table_sql or [""])[0] or "")
+    if needs_rebuild:
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DROP TABLE IF EXISTS meeting_topic_types_scoped")
+            conn.execute(
+                """
+                CREATE TABLE meeting_topic_types_scoped (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                    name TEXT NOT NULL,
+                    color TEXT NOT NULL DEFAULT '#3370ff',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(org_unit_id, name)
+                )
+                """
+            )
+            if "org_unit_id" in columns:
+                conn.execute(
+                    """
+                    INSERT INTO meeting_topic_types_scoped(id, org_unit_id, name, color, sort_order, active)
+                    SELECT id, COALESCE(org_unit_id, ?), name, color, sort_order, active
+                    FROM meeting_topic_types
+                    """,
+                    (root_id,),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO meeting_topic_types_scoped(id, org_unit_id, name, color, sort_order, active)
+                    SELECT id, ?, name, color, sort_order, active FROM meeting_topic_types
+                    """,
+                    (root_id,),
+                )
+            conn.execute("DROP TABLE meeting_topic_types")
+            conn.execute("ALTER TABLE meeting_topic_types_scoped RENAME TO meeting_topic_types")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        conn.execute("UPDATE meeting_topic_types SET org_unit_id=? WHERE org_unit_id IS NULL", (root_id,))
+
+    root_types = rows_to_list(conn.execute(
+        "SELECT * FROM meeting_topic_types WHERE org_unit_id=? AND active=1 ORDER BY sort_order, id",
+        (root_id,),
+    ).fetchall())
+    for unit in conn.execute("SELECT id FROM org_units WHERE active=1 AND id<>? ORDER BY id", (root_id,)).fetchall():
+        if conn.execute("SELECT 1 FROM meeting_topic_types WHERE org_unit_id=? LIMIT 1", (unit["id"],)).fetchone():
+            continue
+        for topic_type in root_types:
+            cursor = conn.execute(
+                """
+                INSERT INTO meeting_topic_types(org_unit_id, name, color, sort_order, active)
+                VALUES(?,?,?,?,?)
+                """,
+                (unit["id"], topic_type["name"], topic_type["color"], topic_type["sort_order"], topic_type["active"]),
+            )
+            new_type_id = cursor.lastrowid
+            conn.execute(
+                """
+                INSERT INTO meeting_topic_options(
+                    type_id, title, default_detail, owner_id, recurrence_weeks,
+                    recurrence_type, recurrence_value, sort_order, active,
+                    duration_minutes, expected_output, materials
+                )
+                SELECT ?, title, default_detail, NULL, recurrence_weeks,
+                       recurrence_type, recurrence_value, sort_order, active,
+                       duration_minutes, expected_output, materials
+                FROM meeting_topic_options WHERE type_id=?
+                """,
+                (new_type_id, topic_type["id"]),
+            )
+    conn.execute(
+        "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
+        (migration_key, now_iso()),
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_topic_types_org ON meeting_topic_types(org_unit_id, active, sort_order)"
+    )
+
+
+def migrate_team_scoped_machines(conn):
+    migration_key = "team_scoped_machines_v1"
+    if conn.execute("SELECT key FROM schema_migrations WHERE key=?", (migration_key,)).fetchone():
+        return
+    root = conn.execute(
+        "SELECT id FROM org_units WHERE active=1 AND parent_id IS NULL ORDER BY sort_order, id LIMIT 1"
+    ).fetchone()
+    if not root:
+        return
+    root_id = root["id"]
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(machines)").fetchall()}
+    table_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='machines'").fetchone()
+    needs_rebuild = "org_unit_id" not in columns or "name TEXT NOT NULL UNIQUE" in str((table_sql or [""])[0] or "")
+    if needs_rebuild:
+        machines = rows_to_list(conn.execute("SELECT * FROM machines ORDER BY id").fetchall())
+        usage = {}
+        for machine in machines:
+            usage[machine["id"]] = [
+                row["org_unit_id"] for row in conn.execute(
+                    """
+                    SELECT DISTINCT u.org_unit_id
+                    FROM shifts s JOIN users u ON u.id=s.user_id
+                    WHERE s.machine_id=? AND u.org_unit_id IS NOT NULL
+                    ORDER BY u.org_unit_id
+                    """,
+                    (machine["id"],),
+                ).fetchall()
+            ] or [root_id]
+        conn.commit()
+        conn.execute("PRAGMA foreign_keys=OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DROP TABLE IF EXISTS machines_scoped")
+            conn.execute(
+                """
+                CREATE TABLE machines_scoped (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    UNIQUE(org_unit_id, name)
+                )
+                """
+            )
+            for machine in machines:
+                org_ids = usage[machine["id"]]
+                conn.execute(
+                    "INSERT INTO machines_scoped(id, org_unit_id, name, description) VALUES(?,?,?,?)",
+                    (machine["id"], org_ids[0], machine["name"], machine.get("description") or ""),
+                )
+            for machine in machines:
+                org_ids = usage[machine["id"]]
+                for org_id in org_ids[1:]:
+                    cursor = conn.execute(
+                        "INSERT INTO machines_scoped(org_unit_id, name, description) VALUES(?,?,?)",
+                        (org_id, machine["name"], machine.get("description") or ""),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE shifts SET machine_id=?
+                        WHERE machine_id=? AND user_id IN (SELECT id FROM users WHERE org_unit_id=?)
+                        """,
+                        (cursor.lastrowid, machine["id"], org_id),
+                    )
+            conn.execute("DROP TABLE machines")
+            conn.execute("ALTER TABLE machines_scoped RENAME TO machines")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+    else:
+        conn.execute("UPDATE machines SET org_unit_id=? WHERE org_unit_id IS NULL", (root_id,))
+    conn.execute(
+        "INSERT INTO schema_migrations(key, applied_at) VALUES(?,?)",
+        (migration_key, now_iso()),
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_machines_org ON machines(org_unit_id, name)")
 
 
 def seed_morning_items(conn):
@@ -1052,10 +1241,12 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS meeting_topic_types (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                name TEXT NOT NULL,
                 color TEXT NOT NULL DEFAULT '#3370ff',
                 sort_order INTEGER NOT NULL DEFAULT 0,
-                active INTEGER NOT NULL DEFAULT 1
+                active INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(org_unit_id, name)
             );
 
             CREATE TABLE IF NOT EXISTS meeting_topic_options (
@@ -1149,8 +1340,10 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS machines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                description TEXT
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                name TEXT NOT NULL,
+                description TEXT,
+                UNIQUE(org_unit_id, name)
             );
 
             CREATE TABLE IF NOT EXISTS shifts (
@@ -1431,6 +1624,8 @@ def init_db():
         conn.execute("UPDATE meetings SET status='completed' WHERE status='closed'")
         conn.execute("UPDATE meeting_items SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE users SET user_type=? WHERE user_type IS NULL OR user_type=''", (DEFAULT_USER_TYPE_KEY,))
+        seed_user_types(conn)
+        seed_organization_units(conn)
         root_org = conn.execute("SELECT id FROM org_units WHERE active=1 AND parent_id IS NULL ORDER BY sort_order, id LIMIT 1").fetchone()
         if root_org:
             conn.execute("UPDATE users SET org_unit_id=? WHERE org_unit_id IS NULL", (root_org["id"],))
@@ -1439,11 +1634,11 @@ def init_db():
         conn.execute("UPDATE members SET sort_order=id WHERE sort_order IS NULL OR sort_order=0")
         conn.execute("UPDATE morning_items SET updated_at=created_at WHERE updated_at IS NULL OR updated_at=''")
         conn.execute("UPDATE morning_items SET root_id=id WHERE root_id IS NULL")
+        migrate_team_scoped_meeting_topics(conn)
+        migrate_team_scoped_machines(conn)
         seed_meeting_topics(conn)
         seed_link_categories(conn)
         seed_system_settings(conn)
-        seed_user_types(conn)
-        seed_organization_units(conn)
         conn.execute(
             """
             UPDATE system_settings
@@ -1469,20 +1664,20 @@ def init_db():
             admin_salt, admin_hash = make_hash("admin123")
             user_salt, user_hash = make_hash("user123")
             conn.execute(
-                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                ("admin", "admin", admin_salt, admin_hash, "管理员", "admin", DEFAULT_USER_TYPE_KEY, now_iso()),
+                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("admin", "admin", admin_salt, admin_hash, "管理员", "admin", DEFAULT_USER_TYPE_KEY, root_org["id"], now_iso()),
             )
             conn.execute(
-                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, created_at) VALUES(?,?,?,?,?,?,?,?)",
-                ("user", "user", user_salt, user_hash, "示例成员", "user", DEFAULT_USER_TYPE_KEY, now_iso()),
+                "INSERT INTO users(username, employee_id, salt, password_hash, display_name, role, user_type, org_unit_id, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("user", "user", user_salt, user_hash, "示例成员", "user", DEFAULT_USER_TYPE_KEY, root_org["id"], now_iso()),
             )
             conn.execute(
-                "INSERT INTO machines(name, description) VALUES(?, ?)",
-                ("机台 A", "默认示例机台，可在管理员视图中维护"),
+                "INSERT INTO machines(org_unit_id, name, description) VALUES(?, ?, ?)",
+                (root_org["id"], "机台 A", "默认示例机台，可在管理员视图中维护"),
             )
             conn.execute(
-                "INSERT INTO machines(name, description) VALUES(?, ?)",
-                ("机台 B", "默认示例机台，可在管理员视图中维护"),
+                "INSERT INTO machines(org_unit_id, name, description) VALUES(?, ?, ?)",
+                (root_org["id"], "机台 B", "默认示例机台，可在管理员视图中维护"),
             )
             conn.execute(
                 "INSERT INTO members(user_id, name, avatar_url, title, responsibilities, tags, comment, created_at) VALUES(?,?,?,?,?,?,?,?)",

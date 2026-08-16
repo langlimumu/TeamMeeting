@@ -114,15 +114,23 @@ def main():
             inherited = next((item for item in templates if item["id"] == template["id"]), None)
             if not inherited or not inherited["inherited"]:
                 raise RuntimeError(f"Upper-level process template did not propagate: {templates}")
-            expect_status(
+            member_created = request_json(
                 user,
                 base_url,
                 "/api/process-templates",
-                403,
                 "POST",
-                {"name": "越权模板", "items": [{"title": "越权步骤"}]},
+                {
+                    "name": "成员自建复盘流程",
+                    "description": "验证所有登录成员都能沉淀当前团队流程模板",
+                    "items": [{"key": "review", "title": "完成复盘记录", "required": True}],
+                },
                 "ess/mo",
             )
+            member_template = next(
+                item for item in member_created["templates"] if item["name"] == "成员自建复盘流程"
+            )
+            if not member_template.get("can_manage") or member_template.get("inherited"):
+                raise RuntimeError(f"Member-created template ownership is invalid: {member_template}")
 
             generated = request_json(
                 user,
@@ -310,6 +318,7 @@ def main():
                 "child_requires_parent": True,
                 "parent_reset_cascades": True,
                 "optional_item_blocks_completion": False,
+                "member_template_creation": True,
                 "team_visible": True,
             }, ensure_ascii=False))
         finally:

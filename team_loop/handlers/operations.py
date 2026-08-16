@@ -146,7 +146,8 @@ class OperationsHandlerMixin:
         where, params = date_filter(query, "s.score_date")
         user = self.current_user(required=False)
         with connect() as conn:
-            org_where, org_params = self.organization_current_user_filter(conn, "u", user)
+            target_user_id = (query.get("user_id") or [None])[0]
+            org_where, org_params = self.organization_workbench_user_filter(conn, "u", user, target_user_id)
             show_black_points = bool(user and user.get("role") == "admin") or get_setting_value(
                 conn, "red_black_show_black_points", "1"
             ) == "1"
@@ -388,7 +389,7 @@ class OperationsHandlerMixin:
         values.append(meeting_id)
         with connect() as conn:
             self.require_meeting_access(conn, meeting_id, admin)
-            meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            meeting = conn.execute("SELECT id, status, org_unit_id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
             conn.execute(f"UPDATE meetings SET {', '.join(fields)} WHERE id=?", values)
@@ -464,7 +465,10 @@ class OperationsHandlerMixin:
                 normalized.append(value)
         with connect() as conn:
             self.require_meeting_access(conn, meeting_id, admin)
-            meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            meeting = conn.execute(
+                "SELECT id, status, org_unit_id FROM meetings WHERE id=?",
+                (meeting_id,),
+            ).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
             if meeting["status"] in ("completed", "archived"):
@@ -472,8 +476,8 @@ class OperationsHandlerMixin:
             active = {
                 row["id"]
                 for row in conn.execute(
-                    "SELECT id FROM meeting_topic_types WHERE active=1 AND id IN ({})".format(",".join("?" for _ in normalized) or "NULL"),
-                    normalized,
+                    "SELECT id FROM meeting_topic_types WHERE active=1 AND org_unit_id=? AND id IN ({})".format(",".join("?" for _ in normalized) or "NULL"),
+                    [meeting["org_unit_id"], *normalized],
                 ).fetchall()
             } if normalized else set()
             conn.execute("DELETE FROM meeting_topic_links WHERE meeting_id=?", (meeting_id,))
@@ -514,9 +518,10 @@ class OperationsHandlerMixin:
                     SELECT o.*, t.name AS type_name
                     FROM meeting_topic_options o
                     JOIN meeting_topic_types t ON t.id = o.type_id
-                    WHERE o.active=1 AND t.active=1
+                    WHERE o.active=1 AND t.active=1 AND t.org_unit_id=?
                     ORDER BY o.sort_order, o.id
-                    """
+                    """,
+                    (org_unit_id,),
                 ).fetchall()
             )
             if not options:
@@ -582,20 +587,24 @@ class OperationsHandlerMixin:
 
     def list_meeting_topics(self):
         with connect() as conn:
+            org_where, org_params = self.organization_current_entity_filter(conn, "t.org_unit_id")
             types = rows_to_list(
                 conn.execute(
-                    "SELECT * FROM meeting_topic_types WHERE active=1 ORDER BY sort_order, id"
+                    f"SELECT t.* FROM meeting_topic_types t WHERE t.active=1 AND {org_where} ORDER BY t.sort_order, t.id",
+                    org_params,
                 ).fetchall()
             )
             options = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT o.*, u.display_name AS owner_name
                     FROM meeting_topic_options o
+                    JOIN meeting_topic_types t ON t.id=o.type_id
                     LEFT JOIN users u ON u.id = o.owner_id
-                    WHERE o.active=1
+                    WHERE o.active=1 AND t.active=1 AND {org_where}
                     ORDER BY o.sort_order, o.id
-                    """
+                    """,
+                    org_params,
                 ).fetchall()
             )
         option_map = {}
@@ -606,20 +615,32 @@ class OperationsHandlerMixin:
         return {"types": types}
 
     def create_meeting_topic_type(self):
-        self.require_admin()
+        admin = self.require_admin()
         data = read_json(self)
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise AppError(400, "议题类型名称不能为空")
         with connect() as conn:
-            cursor = conn.execute(
-                "INSERT INTO meeting_topic_types(name, color, sort_order, active) VALUES(?,?,?,1)",
-                (data.get("name"), data.get("color") or "#3370ff", int(data.get("sort_order") or 0)),
-            )
-            write_audit(conn, self.current_user(), "meeting_topic_type.create", "meeting_topic_type", cursor.lastrowid, "议题类型已创建", {"name": data.get("name")}, self.client_address[0])
+            context = self.organization_context(conn, admin)
+            org_unit_id = context["selected"]["id"]
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO meeting_topic_types(org_unit_id, name, color, sort_order, active) VALUES(?,?,?,?,1)",
+                    (org_unit_id, name, data.get("color") or "#3370ff", int(data.get("sort_order") or 0)),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise AppError(400, "当前团队已存在同名议题类型") from exc
+            write_audit(conn, admin, "meeting_topic_type.create", "meeting_topic_type", cursor.lastrowid, "议题类型已创建", {"name": name, "org_unit_id": org_unit_id}, self.client_address[0])
         return {"message": "议题类型已创建", **self.list_meeting_topics()}
 
     def delete_meeting_topic_type(self, type_id):
         admin = self.require_admin()
         with connect() as conn:
-            topic_type = conn.execute("SELECT id, name FROM meeting_topic_types WHERE id=? AND active=1", (type_id,)).fetchone()
+            org_where, org_params = self.organization_current_entity_filter(conn, "org_unit_id", admin)
+            topic_type = conn.execute(
+                f"SELECT id, name FROM meeting_topic_types WHERE id=? AND active=1 AND {org_where}",
+                [type_id, *org_params],
+            ).fetchone()
             if not topic_type:
                 raise AppError(404, "议题类型不存在")
             conn.execute("UPDATE meeting_topic_types SET active=0 WHERE id=?", (type_id,))
@@ -636,7 +657,7 @@ class OperationsHandlerMixin:
             if strict:
                 raise AppError(400, "责任人数据不正确")
             return None
-        org_where, org_params = self.organization_current_user_filter(conn, "u", user)
+        org_where, org_params = self.organization_user_filter(conn, "u", user)
         owner = conn.execute(
             f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {org_where}",
             [owner_id, *org_params],
@@ -644,7 +665,7 @@ class OperationsHandlerMixin:
         if owner:
             return owner_id
         if strict:
-            raise AppError(400, "责任人不属于当前团队")
+            raise AppError(400, "责任人不属于当前团队或下级团队")
         return None
 
     def create_meeting_topic_option(self):
@@ -652,6 +673,13 @@ class OperationsHandlerMixin:
         data = read_json(self)
         recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
         with connect() as conn:
+            org_where, org_params = self.organization_current_entity_filter(conn, "t.org_unit_id", admin)
+            topic_type = conn.execute(
+                f"SELECT t.id FROM meeting_topic_types t WHERE t.id=? AND t.active=1 AND {org_where}",
+                [data.get("type_id"), *org_params],
+            ).fetchone()
+            if not topic_type:
+                raise AppError(404, "当前团队下未找到该议题类型")
             owner_id = self.current_meeting_owner_id(conn, data.get("owner_id"), admin)
             cursor = conn.execute(
                 "INSERT INTO meeting_topic_options(type_id, title, default_detail, owner_id, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active, duration_minutes, expected_output, materials) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)",
@@ -680,6 +708,24 @@ class OperationsHandlerMixin:
             raise AppError(400, "没有可更新字段")
         values.append(option_id)
         with connect() as conn:
+            org_where, org_params = self.organization_current_entity_filter(conn, "t.org_unit_id", admin)
+            option = conn.execute(
+                f"""
+                SELECT o.id FROM meeting_topic_options o
+                JOIN meeting_topic_types t ON t.id=o.type_id
+                WHERE o.id=? AND o.active=1 AND {org_where}
+                """,
+                [option_id, *org_params],
+            ).fetchone()
+            if not option:
+                raise AppError(404, "当前团队下未找到该预设议题")
+            if "type_id" in data:
+                target_type = conn.execute(
+                    f"SELECT t.id FROM meeting_topic_types t WHERE t.id=? AND t.active=1 AND {org_where}",
+                    [data.get("type_id"), *org_params],
+                ).fetchone()
+                if not target_type:
+                    raise AppError(404, "目标议题类型不属于当前团队")
             if "owner_id" in data:
                 owner_index = fields.index("owner_id=?")
                 values[owner_index] = self.current_meeting_owner_id(conn, data.get("owner_id"), admin)
@@ -690,6 +736,17 @@ class OperationsHandlerMixin:
     def delete_meeting_topic_option(self, option_id):
         admin = self.require_admin()
         with connect() as conn:
+            org_where, org_params = self.organization_current_entity_filter(conn, "t.org_unit_id", admin)
+            option = conn.execute(
+                f"""
+                SELECT o.id FROM meeting_topic_options o
+                JOIN meeting_topic_types t ON t.id=o.type_id
+                WHERE o.id=? AND o.active=1 AND {org_where}
+                """,
+                [option_id, *org_params],
+            ).fetchone()
+            if not option:
+                raise AppError(404, "当前团队下未找到该预设议题")
             conn.execute("UPDATE meeting_topic_options SET active=0 WHERE id=?", (option_id,))
             write_audit(conn, admin, "meeting_topic_option.delete", "meeting_topic_option", option_id, "预设议题已删除", {}, self.client_address[0])
         return {"message": "预设议题已删除", **self.list_meeting_topics()}
@@ -712,9 +769,9 @@ class OperationsHandlerMixin:
                     SELECT o.*, t.name AS type_name
                     FROM meeting_topic_options o
                     JOIN meeting_topic_types t ON t.id = o.type_id
-                    WHERE o.id=?
+                    WHERE o.id=? AND t.org_unit_id=(SELECT org_unit_id FROM meetings WHERE id=?)
                     """,
-                    (option_id,),
+                    (option_id, meeting_id),
                 ).fetchone()
                 if option:
                     type_id = option["type_id"]
@@ -730,7 +787,10 @@ class OperationsHandlerMixin:
                     if not data.get("materials"):
                         data["materials"] = option["materials"] or ""
             elif type_id:
-                topic_type = conn.execute("SELECT name FROM meeting_topic_types WHERE id=?", (type_id,)).fetchone()
+                topic_type = conn.execute(
+                    "SELECT name FROM meeting_topic_types WHERE id=? AND org_unit_id=(SELECT org_unit_id FROM meetings WHERE id=?)",
+                    (type_id, meeting_id),
+                ).fetchone()
                 if topic_type:
                     section = topic_type["name"]
             if not title:
@@ -785,7 +845,7 @@ class OperationsHandlerMixin:
 
         with connect() as conn:
             self.require_meeting_access(conn, meeting_id, actor)
-            meeting = conn.execute("SELECT id, status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
+            meeting = conn.execute("SELECT id, status, org_unit_id FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
             if meeting["status"] in ("completed", "archived"):
@@ -798,7 +858,7 @@ class OperationsHandlerMixin:
                     (meeting_id,),
                 ).fetchall()
             }
-            owner_where, owner_params = self.organization_current_user_filter(conn, "u", actor)
+            owner_where, owner_params = self.organization_user_filter(conn, "u", actor)
             valid_owners = {
                 row["id"]
                 for row in conn.execute(
@@ -820,9 +880,9 @@ class OperationsHandlerMixin:
                     SELECT o.*, t.name AS type_name
                     FROM meeting_topic_options o
                     JOIN meeting_topic_types t ON t.id=o.type_id
-                    WHERE o.id=? AND o.active=1 AND t.active=1
+                    WHERE o.id=? AND o.active=1 AND t.active=1 AND t.org_unit_id=?
                     """,
-                    (requested_item["option_id"],),
+                    (requested_item["option_id"], meeting["org_unit_id"]),
                 ).fetchone()
                 if not option:
                     skipped += 1
@@ -1199,22 +1259,40 @@ class OperationsHandlerMixin:
             write_audit(conn, self.current_user(), "link_category.upsert", "link_category", row["id"] if row else None, "链接分类已保存", {"name": name}, self.client_address[0])
         return {"message": "链接分类已保存", "categories": self.list_link_categories()}
 
-    def list_machines(self):
+    def list_machines(self, viewer=None):
         with connect() as conn:
-            return rows_to_list(conn.execute("SELECT * FROM machines ORDER BY name").fetchall())
+            org_where, org_params = self.organization_current_entity_filter(conn, "m.org_unit_id", viewer)
+            return rows_to_list(
+                conn.execute(f"SELECT m.* FROM machines m WHERE {org_where} ORDER BY m.name", org_params).fetchall()
+            )
 
     def create_machine(self):
         admin = self.require_admin()
         data = read_json(self)
+        name = str(data.get("name") or "").strip()
+        if not name:
+            raise AppError(400, "机台名称不能为空")
         with connect() as conn:
-            cursor = conn.execute("INSERT INTO machines(name, description) VALUES(?,?)", (data.get("name"), data.get("description") or ""))
-            write_audit(conn, admin, "machine.create", "machine", cursor.lastrowid, "机台已创建", {"name": data.get("name")}, self.client_address[0])
-        return {"message": "机台已创建", "machines": self.list_machines()}
+            context = self.organization_context(conn, admin)
+            org_unit_id = context["selected"]["id"]
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO machines(org_unit_id, name, description) VALUES(?,?,?)",
+                    (org_unit_id, name, data.get("description") or ""),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise AppError(400, "当前团队已存在同名机台") from exc
+            write_audit(conn, admin, "machine.create", "machine", cursor.lastrowid, "机台已创建", {"name": name, "org_unit_id": org_unit_id}, self.client_address[0])
+        return {"message": "机台已创建", "machines": self.list_machines(admin)}
 
     def delete_machine(self, machine_id):
         admin = self.require_admin()
         with connect() as conn:
-            machine = conn.execute("SELECT * FROM machines WHERE id=?", (machine_id,)).fetchone()
+            org_where, org_params = self.organization_current_entity_filter(conn, "m.org_unit_id", admin)
+            machine = conn.execute(
+                f"SELECT m.* FROM machines m WHERE m.id=? AND {org_where}",
+                [machine_id, *org_params],
+            ).fetchone()
             if not machine:
                 raise AppError(404, "机台不存在")
             shift_count = conn.execute("SELECT COUNT(*) AS count FROM shifts WHERE machine_id=?", (machine_id,)).fetchone()["count"]
@@ -1230,7 +1308,7 @@ class OperationsHandlerMixin:
                 {"name": machine["name"], "deleted_shifts": shift_count},
                 self.client_address[0],
             )
-        return {"message": "机台已删除", "machines": self.list_machines()}
+        return {"message": "机台已删除", "machines": self.list_machines(admin)}
 
     def list_shifts(self, query):
         where, params = date_filter(query, "s.shift_date")
@@ -1268,12 +1346,16 @@ class OperationsHandlerMixin:
             raise AppError(400, "班次类型不正确")
         with connect() as conn:
             org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            machine_where, machine_params = self.organization_current_entity_filter(conn, "m.org_unit_id", admin)
             default_hours = get_float_setting(conn, "shift_default_hours", 12, minimum=0.5, maximum=24)
             max_daily_hours = get_float_setting(conn, "shift_max_daily_hours", 24, minimum=1, maximum=48)
             hours = float(data.get("hours") or default_hours)
             if hours <= 0 or hours > 24:
                 raise AppError(400, "单条排班工时需要在 0 到 24 小时之间")
-            machine = conn.execute("SELECT id, name FROM machines WHERE id=?", (machine_id,)).fetchone()
+            machine = conn.execute(
+                f"SELECT m.id, m.name FROM machines m WHERE m.id=? AND {machine_where}",
+                [machine_id, *machine_params],
+            ).fetchone()
             member = conn.execute(f"SELECT id, display_name FROM users u WHERE id=? AND active=1 AND {org_where}", [user_id, *org_params]).fetchone()
             if not machine or not member:
                 raise AppError(404, "机台或排班成员不存在")
@@ -1330,7 +1412,9 @@ class OperationsHandlerMixin:
     def shift_dashboard(self, query):
         where, params = date_filter(query, "s.shift_date")
         with connect() as conn:
-            org_where, org_params = self.organization_current_user_filter(conn, "u")
+            actor = self.current_user(required=False)
+            target_user_id = (query.get("user_id") or [None])[0]
+            org_where, org_params = self.organization_workbench_user_filter(conn, "u", actor, target_user_id)
             by_user = rows_to_list(
                 conn.execute(
                     f"""
@@ -1532,8 +1616,12 @@ class OperationsHandlerMixin:
     def thank_you_dashboard(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
-            org_where, org_params = self.organization_current_user_filter(conn, "receiver", viewer)
-            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", viewer)
+            target_user_id = (query.get("user_id") or [None])[0]
+            org_where, org_params = self.organization_workbench_user_filter(conn, "receiver", viewer, target_user_id)
+            if viewer and viewer.get("role") == "admin" and target_user_id not in (None, "", 0, "0"):
+                giver_where, giver_params = "1=1", []
+            else:
+                giver_where, giver_params = self.organization_current_user_filter(conn, "giver", viewer)
             stars = rows_to_list(
                 conn.execute(
                     f"""

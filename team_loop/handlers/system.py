@@ -284,7 +284,7 @@ class SystemHandlerMixin:
                     add_result("team_replies", "团队回复", row["id"], "回复", row["content"], row["created_at"], row.get("owner"), "members")
 
             if wants("moments") and self.can_view_module(user, "moments"):
-                org_where, org_params = self.organization_entity_filter(conn, "m.org_unit_id", user, inherit_ancestors=True)
+                org_where, org_params = self.organization_current_entity_filter(conn, "m.org_unit_id", user)
                 params = list(org_params)
                 where = f"m.deleted_at IS NULL AND {org_where}"
                 if keyword:

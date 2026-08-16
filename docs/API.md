@@ -103,7 +103,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/team-moments` | 查询当前组织与祖先组织的有效团队时刻；可传 `year`、`keyword` |
+| GET | `/api/team-moments` | 查询当前选中团队的有效团队时刻；可传 `year`、`keyword`，不继承祖先数据 |
 | POST | `/api/team-moments` | 发布团队时刻，`images` 最多 6 张 Base64 图片 |
 | PATCH | `/api/team-moments/{id}` | 修改事迹并通过 `new_images`、`remove_image_ids` 调整图片 |
 | DELETE | `/api/team-moments/{id}` | 软删除并进入回收站 |
@@ -119,7 +119,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/morning-items` | 按日期查询或新增事项 |
+| GET/POST | `/api/morning-items` | 按日期查询或新增事项；管理员 GET 可传当前可访问子树中的 `user_id` 只读查看工作台 |
 | GET | `/api/morning-items/version` | 返回当天早例会轻量版本号，供前端轮询是否有他人更新 |
 | PATCH | `/api/morning-items/order` | 管理员提交当前层级完整参会人员 ID，保存早例会显示顺序 |
 | PATCH/DELETE | `/api/morning-items/{id}` | 更新或删除可编辑事项 |
@@ -133,8 +133,8 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/process-templates` | 查询可用模板；管理员在当前团队创建模板 |
-| PATCH/DELETE | `/api/process-templates/{id}` | 管理员修改或停用当前团队模板 |
+| GET/POST | `/api/process-templates` | 查询可用模板；所有已登录且可查看流程中心的成员可在当前团队创建模板 |
+| PATCH/DELETE | `/api/process-templates/{id}` | 创建人维护自己的当前团队模板；管理员可维护当前团队全部模板 |
 | GET/POST | `/api/process-instances` | 查询个人/团队流程，或从模板生成个人流程 |
 | PATCH/DELETE | `/api/process-instances/{id}` | 修改名称、截止日期，或取消允许操作的个人流程 |
 | PATCH | `/api/process-instance-items/{id}` | 勾选或取消单个流程节点 |
@@ -151,12 +151,12 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/meetings` | 查询或创建单场会议；查询响应另含当前层级 `attendance_users`，创建受 `meetings.create` 权限控制 |
+| GET/POST | `/api/meetings` | 查询或创建单场会议；响应含直属签到名单 `attendance_users` 和当前子树协调名单 `coordination_users` |
 | PATCH | `/api/meetings/{id}` | 更新会议信息或阶段 |
 | POST | `/api/meetings/bulk-generate` | 根据预设周期批量生成 |
 | PATCH | `/api/meetings/{id}/topics` | 设置本场会议主题 |
 | POST | `/api/meetings/{id}/copy-agenda` | 沿用最近会议议题 |
-| GET | `/api/meeting-topics` | 议题类型与预设选项 |
+| GET | `/api/meeting-topics` | 当前选中团队独立的议题类型与预设选项 |
 | POST/DELETE | `/api/meeting-topic-types[/{id}]` | 管理员新增或停用一级议题分类 |
 | POST | `/api/meeting-topic-options` | 管理员新增二级预设议题 |
 | PATCH/DELETE | `/api/meeting-topic-options/{id}` | 管理员修改或停用二级预设议题 |
@@ -171,7 +171,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 创建和更新会议可传 `start_time`，格式为 24 小时制 `HH:MM`。会议纪要邮件是否附带 Thank You 由前端生成时选择，不改变会议数据。
 
-会议签到名单和议题责任人都只接受当前选中组织层级的直属成员；预设议题原责任人不在当前层级时会留空，需重新指定。
+会议签到名单只接受当前选中组织层级的直属成员。议题责任人用于跨层协调，可从当前团队及其所有可访问下级团队成员中选择；服务端仍拒绝上级、兄弟或不可访问组织账号。
 
 议题常用字段：
 
@@ -191,7 +191,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/machines` | 查询或新增机台 |
+| GET/POST | `/api/machines` | 查询或新增当前选中团队的独立机台 |
 | DELETE | `/api/machines/{id}` | 删除机台及其排班 |
 | GET/POST | `/api/shifts` | 查询或批量新增排班；查询响应另含当前层级 `users` |
 | DELETE | `/api/shifts/{id}` | 删除单条排班 |
@@ -205,6 +205,8 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | GET | `/api/dashboards/thank-you` | 月度/年度 Thank You 排名 |
 
 批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。排班、签到、红黑榜和 Thank You 的查询与写入都会在服务端校验相关账号属于当前选中组织的直接成员，并继续校验对应业务参与开关。
+
+管理员可在个人工作台调用三个 `/api/dashboards/*` 接口并追加 `user_id`，目标必须位于当前选中团队的可访问子树；普通用户传入该参数不会扩大范围。`GET /api/users/coordination` 返回管理员可用于工作台检查和上层会议责任人协调的当前子树账号。
 
 `GET /api/thank-you` 的候选人只返回当前层级中纳入 Thank You 名单的账号。感谢记录只有发送人和接收人都属于当前层级时才在动态与排名中出现；切换到上级或兄弟团队不会汇总下级感谢。
 

@@ -52,6 +52,8 @@ def permissions_for(user):
             }
             for row in rows
         }
+        if operations.get("processes", {}).get("view"):
+            operations["processes"]["create"] = True
     modules = sorted(module for module, actions in operations.items() if actions.get("view"))
     return {
         "isAdmin": is_admin,

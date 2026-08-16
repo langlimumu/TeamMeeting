@@ -30,6 +30,7 @@ const state = {
   links: [],
   meetings: [],
   meetingUsers: [],
+  coordinationUsers: [],
   morningItems: [],
   morningUsers: [],
   morningVersionToken: "",
@@ -73,6 +74,8 @@ const state = {
   activeShiftPopoverDate: null,
   personalMorningMonthItems: [],
   activePersonalMorningChain: null,
+  dashboardUsers: [],
+  dashboardUserId: null,
   currentPage: "members",
   morningDate: iso(new Date()),
   shiftMonth: new Date(),
@@ -331,6 +334,7 @@ async function selectOrganizationPath(path) {
   state.morningItems = [];
   state.morningUsers = [];
   state.meetingUsers = [];
+  state.coordinationUsers = [];
   state.shiftUsers = [];
   state.ruleUsers = [];
   state.morningVersionToken = "";
@@ -933,8 +937,8 @@ function populateSelects() {
   $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
   $$("[data-owner-users]").forEach((select) => {
     const current = select.value;
-    select.innerHTML = renderUserOptions(current, "默认负责人", state.meetingUsers);
-    select.value = state.meetingUsers.some((user) => Number(user.id) === Number(current)) ? current : "";
+    select.innerHTML = renderUserOptions(current, "默认负责人", state.coordinationUsers);
+    select.value = state.coordinationUsers.some((user) => Number(user.id) === Number(current)) ? current : "";
   });
   $$("[data-link-categories], [data-link-edit-categories]").forEach((select) => { select.innerHTML = linkCategoryOptions || '<option value="通用">通用</option>'; });
   const linkFilter = $("#linkCategoryFilter");
@@ -1055,7 +1059,7 @@ function formatBytes(value = 0) {
 }
 
 function isMyMorningItem(item) {
-  return Number(item.owner_id) === Number(state.user?.id);
+  return Number(item.owner_id) === Number(state.dashboardUserId || state.user?.id);
 }
 
 function sortMorningForWorkbench(items = []) {
@@ -1110,7 +1114,12 @@ function renderPersonalMorningCard(item) {
   const chain = morningChainId(item);
   const color = personalLineColors[hashIndex(chain, personalLineColors.length)];
   const isActive = state.activePersonalMorningChain === chain;
-  if (!canOperate("morning", "edit")) {
+  const viewingAnotherUser = Boolean(
+    isAdminView()
+    && state.dashboardUserId
+    && Number(state.dashboardUserId) !== Number(state.user?.id),
+  );
+  if (!canOperate("morning", "edit") || viewingAnotherUser) {
     return `<article class="personal-reminder-card ${statusClass} ${isActive ? "calendar-focused" : ""}" data-personal-calendar-focus="${escapeHtml(chain)}" style="--line-color:${color}">
       <div class="personal-card-head"><div><strong>${escapeHtml(item.title)}</strong><div class="personal-card-meta"><span>${escapeHtml(compactDate(item.start_date || item.item_date))} 起 · ${Number(item.duration_days || 1)} 天</span></div></div><span class="pill">${escapeHtml(statusLabel)}</span></div>
       ${item.detail ? `<p>${escapeHtml(item.detail)}</p>` : ""}
@@ -1324,7 +1333,7 @@ function focusPersonalMorningChain(chain) {
 }
 
 function findMyDashboardRow(items = []) {
-  return items.find((item) => Number(item.id) === Number(state.user?.id)) || null;
+  return items.find((item) => Number(item.id) === Number(state.dashboardUserId || state.user?.id)) || null;
 }
 
 function renderOwnScoreSummary(score) {
@@ -1342,11 +1351,12 @@ function renderOwnThanksSummary(thanks) {
   `;
 }
 
-async function loadPersonalMorningMonth() {
+async function loadPersonalMorningMonth(userId = null) {
   const today = iso(new Date());
   const start = iso(monthStart(new Date()));
   const dates = dateListBetween(start, today);
-  const responses = await Promise.all(dates.map((date) => api(`/api/morning-items?date=${encodeURIComponent(date)}`)));
+  const userQuery = userId ? `&user_id=${encodeURIComponent(userId)}` : "";
+  const responses = await Promise.all(dates.map((date) => api(`/api/morning-items?date=${encodeURIComponent(date)}${userQuery}`)));
   const todayData = responses.find((response) => response.date === today) || responses[responses.length - 1] || { items: [] };
   return {
     today: todayData,
@@ -1359,11 +1369,27 @@ async function loadDashboard() {
   const emptyThanks = { stars: [] };
   const emptyShifts = { by_user: [], by_machine: [] };
   const emptyMorning = { today: { items: [] }, monthItems: [] };
+  if (isAdminView()) {
+    const response = await api("/api/users/coordination").catch(() => ({ users: [] }));
+    state.dashboardUsers = response.users || [];
+  } else {
+    state.dashboardUsers = state.user ? [state.user] : [];
+    state.dashboardUserId = state.user?.id || null;
+  }
+  if (!state.dashboardUsers.some((user) => Number(user.id) === Number(state.dashboardUserId))) {
+    state.dashboardUserId = state.dashboardUsers.find((user) => Number(user.id) === Number(state.user?.id))?.id
+      || state.dashboardUsers[0]?.id
+      || state.user?.id
+      || null;
+  }
+  const selectedUser = state.dashboardUsers.find((user) => Number(user.id) === Number(state.dashboardUserId));
+  const metricOwner = selectedUser?.display_name || "我";
+  const targetQuery = isAdminView() && state.dashboardUserId ? `&user_id=${encodeURIComponent(state.dashboardUserId)}` : "";
   const [scores, thanks, shifts, morning] = await Promise.all([
-    canLoadModule("rules") ? api(`/api/dashboards/red-black?${periodQuery()}`).catch(() => emptyScores) : emptyScores,
-    canLoadModule("thanks") ? api(`/api/dashboards/thank-you?${periodQuery()}`).catch(() => emptyThanks) : emptyThanks,
-    canLoadModule("shifts") ? api(`/api/dashboards/shifts?${periodQuery()}`).catch(() => emptyShifts) : emptyShifts,
-    canLoadModule("morning") ? loadPersonalMorningMonth().catch(() => emptyMorning) : emptyMorning,
+    canLoadModule("rules") ? api(`/api/dashboards/red-black?${periodQuery()}${targetQuery}`).catch(() => emptyScores) : emptyScores,
+    canLoadModule("thanks") ? api(`/api/dashboards/thank-you?${periodQuery()}${targetQuery}`).catch(() => emptyThanks) : emptyThanks,
+    canLoadModule("shifts") ? api(`/api/dashboards/shifts?${periodQuery()}${targetQuery}`).catch(() => emptyShifts) : emptyShifts,
+    canLoadModule("morning") ? loadPersonalMorningMonth(isAdminView() ? state.dashboardUserId : null).catch(() => emptyMorning) : emptyMorning,
   ]);
   const myScore = findMyDashboardRow(scores.totals);
   const myThanks = findMyDashboardRow(thanks.stars);
@@ -1373,8 +1399,26 @@ async function loadDashboard() {
   $("#metricThanks").textContent = Number(myThanks?.thanks || 0);
   $("#metricHours").textContent = Number(myShift?.hours || 0);
   $("#metricMeetings").textContent = myMorningItems.length;
+  if ($("#metricScoreLabel")) $("#metricScoreLabel").textContent = `${metricOwner}的红榜 / 黑榜积分`;
+  if ($("#metricThanksLabel")) $("#metricThanksLabel").textContent = `${metricOwner}收到的 Thank You`;
+  if ($("#metricHoursLabel")) $("#metricHoursLabel").textContent = `${metricOwner}的已排工时`;
+  if ($("#metricMeetingsLabel")) $("#metricMeetingsLabel").textContent = `${metricOwner}的早例会事项`;
   $("#scoreRank").innerHTML = renderOwnScoreSummary(myScore);
   $("#thanksRank").innerHTML = renderOwnThanksSummary(myThanks);
+  const viewingOther = Boolean(isAdminView() && selectedUser && Number(selectedUser.id) !== Number(state.user?.id));
+  const dashboardField = $("#dashboardUserField");
+  dashboardField?.classList.toggle("hidden", !isAdminView());
+  const dashboardSelect = $("#dashboardUserSelect");
+  if (dashboardSelect) {
+    dashboardSelect.innerHTML = state.dashboardUsers.map((user) => {
+      const label = user.org_unit_name ? `${user.display_name} · ${user.org_unit_name}` : user.display_name;
+      return `<option value="${user.id}" ${Number(user.id) === Number(state.dashboardUserId) ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    }).join("");
+  }
+  if ($("#personalWorkbenchTitle")) {
+    $("#personalWorkbenchTitle").textContent = viewingOther ? `${selectedUser.display_name}的工作台` : "我的工作台";
+  }
+  $("#personalMorningCreateForm")?.classList.toggle("hidden", viewingOther);
   renderPersonalWorkbench({
     morningItems: morning.today?.items || [],
     monthItems: morning.monthItems || [],
@@ -2224,7 +2268,7 @@ function renderProcessTemplates() {
     target.innerHTML = `
       <div class="process-empty">
         <strong>还没有可用流程模板</strong>
-        <span>${isAdminView() ? "先新建一个模板，把经常重复的步骤固化下来。" : "请联系管理员维护团队流程模板。"}</span>
+        <span>${canOperate("processes", "create") ? "新建一个模板，把经常重复的步骤固化下来。" : "当前账号只能查看流程模板。"}</span>
       </div>`;
     return;
   }
@@ -2239,7 +2283,7 @@ function renderProcessTemplates() {
           </div>
           <p>${escapeHtml(template.description || "按顺序完成以下标准步骤。")}</p>
         </div>
-        ${isAdminView() && !template.inherited ? `
+        ${template.can_manage ? `
           <div class="process-card-menu">
             <button class="icon-button" type="button" data-process-template-edit="${template.id}" title="编辑模板" aria-label="编辑模板">✎</button>
             <button class="icon-button danger" type="button" data-process-template-delete="${template.id}" data-process-template-name="${escapeHtml(template.name)}" title="停用模板" aria-label="停用模板">×</button>
@@ -2347,7 +2391,7 @@ function renderProcesses() {
       <div><span>已完成</span><strong>${completed}</strong></div>
     `;
   }
-  $("#openProcessTemplateBtn")?.classList.toggle("hidden", !isAdminView());
+  $("#openProcessTemplateBtn")?.classList.toggle("hidden", !state.user || !canOperate("processes", "create"));
   $$("[data-process-scope]").forEach((button) => {
     button.classList.toggle("active", button.dataset.processScope === state.processScope);
     button.classList.toggle("hidden", button.dataset.processScope === "team" && !isAdminView());
@@ -3436,7 +3480,10 @@ function topicOptionsForMeeting(meeting, selectedId = null) {
 function renderUserOptions(selectedId, placeholder = "负责人", users = state.users) {
   const options = users
     .filter((user) => user.active !== 0)
-    .map((user) => `<option value="${user.id}" ${Number(selectedId) === Number(user.id) ? "selected" : ""}>${escapeHtml(user.display_name)}</option>`)
+    .map((user) => {
+      const label = user.org_unit_name ? `${user.display_name} · ${user.org_unit_name}` : user.display_name;
+      return `<option value="${user.id}" ${Number(selectedId) === Number(user.id) ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    })
     .join("");
   return `<option value="">${placeholder}</option>${options}`;
 }
@@ -3452,7 +3499,7 @@ function renderTopicPresetList() {
         ${topic.options.map((option) => `<form class="preset-row preset-form" data-option-id="${option.id}">
           <div class="preset-row-main">
             <input name="title" value="${escapeHtml(option.title)}" placeholder="二级议题名称" required>
-            <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人", state.meetingUsers)}</select>
+            <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人", state.coordinationUsers)}</select>
             <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
             <span>${Number(option.duration_minutes || 10)} 分钟</span>
             <button>保存</button>
@@ -3485,7 +3532,7 @@ function renderPresetTopicForm(meeting) {
       <select name="type_id" data-meeting-topic-select required>${topicOptionsForMeeting(meeting)}</select>
       <select name="option_id" data-meeting-option-select><option value="">自定义议题</option>${options.map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}</select>
       <input name="title" placeholder="自定义标题，选择预设时可留空" />
-      <select name="owner_id">${renderUserOptions(null, "负责人", state.meetingUsers)}</select>
+      <select name="owner_id">${renderUserOptions(null, "负责人", state.coordinationUsers)}</select>
       <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
       <input name="expected_output" placeholder="期望产出，例如形成结论" />
       <input name="materials" placeholder="会前材料、数据或链接" />
@@ -3503,7 +3550,7 @@ function renderCustomTopicForm(meeting) {
     <form class="form-grid compact topic-item-form custom-topic-form" data-meeting-id="${meeting.id}">
       <select name="type_id" required>${topicOptionsForMeeting(meeting)}</select>
       <input name="title" placeholder="自定义议题标题" required />
-      <select name="owner_id">${renderUserOptions(null, "负责人", state.meetingUsers)}</select>
+      <select name="owner_id">${renderUserOptions(null, "负责人", state.coordinationUsers)}</select>
       <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
       <input name="expected_output" placeholder="期望产出，例如同步信息" />
       <input name="materials" placeholder="会前材料、数据或链接" />
@@ -3593,7 +3640,7 @@ function openMeetingMinuteModal(itemId, mode = "minutes") {
   form.dataset.itemId = item.id;
   form.dataset.meetingId = meeting.id;
   form.reset();
-  form.elements.owner_id.innerHTML = renderUserOptions(item.owner_id, "负责人", state.meetingUsers);
+  form.elements.owner_id.innerHTML = renderUserOptions(item.owner_id, "负责人", state.coordinationUsers);
   form.elements.owner_id.value = item.owner_id ? String(item.owner_id) : "";
   form.elements.status.innerHTML = renderMeetingItemStatusOptions(item.status || "todo");
   form.elements.status.value = item.status || "todo";
@@ -3678,7 +3725,7 @@ function renderMeetingAgendaPicker(meeting) {
               <input class="meeting-agenda-option-check" type="checkbox" value="${option.id}" ${added ? "disabled" : ""}>
               <span><strong>${escapeHtml(option.title)}</strong><small>${escapeHtml(option.default_detail || option.expected_output || "暂无补充说明")}</small></span>
             </label>
-            <select class="meeting-agenda-owner" disabled aria-label="${escapeHtml(option.title)}责任人">${renderUserOptions(option.owner_id, "选择责任人", state.meetingUsers)}</select>
+            <select class="meeting-agenda-owner" disabled aria-label="${escapeHtml(option.title)}责任人">${renderUserOptions(option.owner_id, "选择责任人", state.coordinationUsers)}</select>
             <span class="meeting-agenda-option-meta">${added ? "已加入" : `${Number(option.duration_minutes || 10)} 分钟`}</span>
           </div>`;
         }).join("")}
@@ -4543,6 +4590,7 @@ async function loadMeetings() {
   const data = await api(`/api/meetings?${meetingPeriodQuery()}`);
   state.meetings = data.meetings;
   state.meetingUsers = data.attendance_users || [];
+  state.coordinationUsers = data.coordination_users || state.meetingUsers;
   populateSelects();
   const visibleMeetings = upcomingMeetings(state.meetings);
   const selectedStillVisible = visibleMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
@@ -6623,6 +6671,11 @@ function bindEvents() {
     loadMorning({ preserveScroll: true })
       .then(() => toast("早例会已刷新"))
       .catch((error) => toast(error.message));
+  });
+  $("#dashboardUserSelect")?.addEventListener("change", (event) => {
+    state.dashboardUserId = Number(event.target.value) || state.user?.id || null;
+    state.activePersonalMorningChain = null;
+    loadDashboard().catch((error) => toast(error.message));
   });
   $("#thankPeriodControls")?.addEventListener("change", (event) => {
     if (event.target.matches("#thankYearSelect")) {

@@ -67,7 +67,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 `team_posts.deleted_at` 与 `deleted_by` 用于主题软删除。回收站以 `team_post` 作为实体类型；恢复时只清空主题删除标记，彻底清除时由外键级联删除回复与回应。作者可以维护自己的主题，管理员承担公告、置顶和恢复治理职责。
 
-团队时刻图片保存在 `team_moment_images.image_data`，因此数据库备份会同时包含图片，不会产生文件目录与数据库不一致的问题。`team_moments` 向下级组织只读透传；修改和删除必须在记录原组织的直接可见范围内执行。回收站实体类型为 `team_moment`，彻底删除时图片由外键级联清理。
+团队时刻图片保存在 `team_moment_images.image_data`，因此数据库备份会同时包含图片，不会产生文件目录与数据库不一致的问题。`team_moments` 只在记录所属的当前团队展示，不向上级或下级透传；修改和删除同样要求当前路由直接选中该团队。回收站实体类型为 `team_moment`，彻底删除时图片由外键级联清理。
 
 ### 会议与早例会
 
@@ -76,7 +76,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 | `morning_items` | 每日事项、状态、优先级、风险、继承链和进展 |
 | `meetings` | 会议日期、开始时间、主题、摘要、创建人和阶段 |
 | `meeting_items` | 议题、纪要、负责人、时间盒、会前材料和顺延来源 |
-| `meeting_topic_types` | 管理员维护的一级议题分类和颜色 |
+| `meeting_topic_types` | 管理员按团队维护的一级议题分类和颜色，`org_unit_id` 标识归属 |
 | `meeting_topic_options` | 隶属于一级分类的二级预设议题、周期和默认准备信息 |
 | `meeting_topic_links` | 每场会议独立启用的议题类型 |
 | `meeting_attendance` | 签到、乐捐金额和收款状态 |
@@ -98,7 +98,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 | --- | --- |
 | `red_black_rules` | 红黑榜细则 |
 | `red_black_scores` | 个人红榜/黑榜积分事实 |
-| `machines` | 机台档案 |
+| `machines` | 按团队隔离的机台档案，`org_unit_id + name` 在团队内唯一 |
 | `shifts` | 白班、夜班和工时 |
 | `thank_you_votes` | Thank You 记录和事实依据 |
 | `links` | 链接、标签、置顶、质量和访问量 |
@@ -125,6 +125,8 @@ data/deploy/runtime/                  # 进程元数据和日志
 2. 通过 `ensure_column()` 增加缺少字段；
 3. 执行幂等的数据兼容更新；
 4. 写入默认配置、用户类型和示例基础数据（仅在对应数据为空时）。
+
+旧库首次升级时会执行两项带迁移标记的受控表重建：为议题类型和机台补充 `org_unit_id`。旧议题库先归属根团队，再复制一份独立模板到尚无议题库的有效团队；旧机台根据既有排班人员所属团队拆分并重绑排班。迁移完成后分别使用团队内唯一约束，后续新增和查询均按当前团队过滤。正式升级前必须先备份，并在灰度库运行 `PRAGMA foreign_key_check`、组织范围测试和排班抽查。
 
 验证迁移：
 

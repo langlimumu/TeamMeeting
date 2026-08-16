@@ -90,8 +90,13 @@ def link_meeting_topic(conn, meeting_id, type_id, created_by=None):
     if not type_id:
         return
     topic = conn.execute(
-        "SELECT id, sort_order FROM meeting_topic_types WHERE id=? AND active=1",
-        (type_id,),
+        """
+        SELECT t.id, t.sort_order
+        FROM meeting_topic_types t
+        JOIN meetings m ON m.id=? AND m.org_unit_id=t.org_unit_id
+        WHERE t.id=? AND t.active=1
+        """,
+        (meeting_id, type_id),
     ).fetchone()
     if not topic:
         return

@@ -205,6 +205,24 @@ class RequestHandlerMixin:
             return "1=0", []
         return f"{user_alias}.org_unit_id=?", [selected_id]
 
+    def organization_workbench_user_filter(self, conn, user_alias="u", user=None, raw_user_id=None):
+        """Allow an admin to inspect one accessible descendant without widening normal team lists."""
+        actor = user if user is not None else getattr(self, "api_user", None)
+        if actor and actor.get("role") == "admin" and raw_user_id not in (None, "", 0, "0"):
+            try:
+                user_id = int(raw_user_id)
+            except (TypeError, ValueError) as exc:
+                raise AppError(400, "工作台成员参数不正确") from exc
+            scope_where, scope_params = self.organization_user_filter(conn, user_alias, actor)
+            target = conn.execute(
+                f"SELECT {user_alias}.id FROM users {user_alias} WHERE {user_alias}.id=? AND {user_alias}.active=1 AND {scope_where}",
+                [user_id, *scope_params],
+            ).fetchone()
+            if not target:
+                raise AppError(404, "当前团队范围内未找到该成员")
+            return f"{user_alias}.id=?", [user_id]
+        return self.organization_current_user_filter(conn, user_alias, actor)
+
     def organization_entity_filter(self, conn, column, user=None, inherit_ancestors=False):
         context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
         visible_ids = set(context["visible_ids"])
@@ -215,6 +233,14 @@ class RequestHandlerMixin:
             return "1=0", []
         placeholders = ",".join("?" for _ in visible_ids)
         return f"{column} IN ({placeholders})", visible_ids
+
+    def organization_current_entity_filter(self, conn, column, user=None):
+        """Limit team-owned configuration and content to the selected unit only."""
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        selected_id = (context.get("selected") or {}).get("id")
+        if not selected_id:
+            return "1=0", []
+        return f"{column}=?", [selected_id]
 
     def organization_collaboration_user_filter(self, conn, user_alias="u", user=None):
         context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
@@ -259,10 +285,8 @@ class RequestHandlerMixin:
         if not moment:
             raise AppError(404, "团队时刻不存在")
         context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
-        allowed_ids = set(context["visible_ids"])
-        if not write:
-            allowed_ids.update(context["ancestor_ids"])
-        if moment["org_unit_id"] not in allowed_ids:
+        selected_id = (context.get("selected") or {}).get("id")
+        if moment["org_unit_id"] != selected_id:
             raise AppError(404, "团队时刻不存在或无权访问")
         return moment
 
@@ -500,7 +524,8 @@ class RequestHandlerMixin:
                 """,
                 ((user.get("user_type") if user else GUEST_USER_TYPE_KEY) or DEFAULT_USER_TYPE_KEY, module_key),
             ).fetchone()
-        if not row or not row["can_view"] or not row["allowed"]:
+        process_create = bool(user and module_key == "processes" and action == "create")
+        if not row or not row["can_view"] or (not row["allowed"] and not process_create):
             if not user:
                 raise AppError(403, "访客无权查看该模块")
             action_name = {"view": "查看", "create": "新增", "edit": "编辑", "delete": "删除"}[action]
@@ -605,6 +630,8 @@ class RequestHandlerMixin:
                 return {"users": self.list_users()}
             if method == "POST":
                 return self.create_user()
+        if path == "/api/users/coordination" and method == "GET":
+            return {"users": self.list_organization_coordination_users(user)}
         if path == "/api/users/bulk-type" and method == "PATCH":
             return self.bulk_update_user_type(user)
         if path == "/api/users/bulk-org" and method == "PATCH":
@@ -711,6 +738,7 @@ class RequestHandlerMixin:
                 return {
                     "meetings": self.list_meetings(query),
                     "attendance_users": self.list_current_organization_users(user),
+                    "coordination_users": self.list_organization_coordination_users(user),
                 }
             if method == "POST":
                 return self.create_meeting(user)
@@ -768,7 +796,7 @@ class RequestHandlerMixin:
 
         if path == "/api/machines":
             if method == "GET":
-                return {"machines": self.list_machines()}
+                return {"machines": self.list_machines(user)}
             if method == "POST":
                 return self.create_machine()
         if len(parts) == 3 and parts[:2] == ["api", "machines"] and method == "DELETE":

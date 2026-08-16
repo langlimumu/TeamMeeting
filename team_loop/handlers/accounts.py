@@ -1028,6 +1028,25 @@ class AccountsHandlerMixin:
                 ).fetchall()
             )
 
+    def list_organization_coordination_users(self, viewer=None):
+        with connect() as conn:
+            org_where, org_params = self.organization_user_filter(conn, "u", viewer)
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT u.id, u.username, u.display_name, u.user_type,
+                           COALESCE(t.name, u.user_type) AS user_type_name,
+                           u.org_unit_id, o.name AS org_unit_name
+                    FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    LEFT JOIN org_units o ON o.id=u.org_unit_id
+                    WHERE u.active=1 AND {org_where}
+                    ORDER BY o.sort_order, o.name, t.sort_order, u.display_name, u.id
+                    """,
+                    org_params,
+                ).fetchall()
+            )
+
     def bulk_update_user_type(self, admin):
         self.require_admin()
         data = read_json(self)

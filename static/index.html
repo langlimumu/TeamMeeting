@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260811-moments-bright" />
+    <link rel="stylesheet" href="/style.css?v=20260817-team-scope-v1" />
   </head>
   <body>
     <div class="app-shell">
@@ -551,18 +551,21 @@
 
           <section id="dashboard" class="page">
             <div class="metrics">
-              <div><span>我的红榜 / 黑榜积分</span><strong id="metricScore">红 0 / 黑 0</strong></div>
-              <div><span>我收到的 Thank You</span><strong id="metricThanks">0</strong></div>
-              <div><span>我的已排工时</span><strong id="metricHours">0</strong></div>
-              <div><span>我的早例会事项</span><strong id="metricMeetings">0</strong></div>
+              <div><span id="metricScoreLabel">我的红榜 / 黑榜积分</span><strong id="metricScore">红 0 / 黑 0</strong></div>
+              <div><span id="metricThanksLabel">我收到的 Thank You</span><strong id="metricThanks">0</strong></div>
+              <div><span id="metricHoursLabel">我的已排工时</span><strong id="metricHours">0</strong></div>
+              <div><span id="metricMeetingsLabel">我的早例会事项</span><strong id="metricMeetings">0</strong></div>
             </div>
             <section class="panel personal-workbench-panel">
               <div class="panel-title">
                 <div>
-                  <h2>我的工作台</h2>
+                  <h2 id="personalWorkbenchTitle">我的工作台</h2>
                   <p>新增和更新会同步到早例会；月历按事项持续天数显示。</p>
                 </div>
-                <span class="pill">今日早例会</span>
+                <div class="personal-workbench-head-actions">
+                  <label id="dashboardUserField" class="dashboard-user-field hidden"><span>查看成员</span><select id="dashboardUserSelect"></select></label>
+                  <span class="pill">今日早例会</span>
+                </div>
               </div>
               <form id="personalMorningCreateForm" class="personal-create-form">
                 <input name="title" placeholder="新增进行中事项，例如：TOPTB 温控复核" required />
@@ -1348,6 +1351,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260810-moments-v2"></script>
+    <script type="module" src="/app.js?v=20260817-team-scope-v1"></script>
   </body>
 </html>

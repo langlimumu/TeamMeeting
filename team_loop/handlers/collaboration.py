@@ -11,8 +11,7 @@ class CollaborationHandlerMixin:
         if len(keyword) > 80:
             raise AppError(400, "搜索关键词最多 80 个字符")
         with connect() as conn:
-            context = self.organization_context(conn, user)
-            org_where, org_params = self.organization_entity_filter(conn, "m.org_unit_id", user, inherit_ancestors=True)
+            org_where, org_params = self.organization_current_entity_filter(conn, "m.org_unit_id", user)
             where = ["m.deleted_at IS NULL", org_where]
             params = list(org_params)
             if year:
@@ -53,10 +52,9 @@ class CollaborationHandlerMixin:
                     cache_version = "".join(character for character in str(image.get("created_at") or "") if character.isdigit())
                     image["url"] = f"/api/team-moment-images/{image['id']}?v={cache_version or image['id']}"
                     images_by_moment[image["moment_id"]].append(image)
-        inherited_ids = set(context["ancestor_ids"]) - set(context["visible_ids"])
         for moment in moments:
             moment["images"] = images_by_moment.get(moment["id"], [])
-            moment["inherited"] = moment["org_unit_id"] in inherited_ids
+            moment["inherited"] = False
             moment["mine"] = bool(user and moment["created_by"] == user["id"])
         return moments
 
@@ -563,7 +561,11 @@ class CollaborationHandlerMixin:
             raise AppError(400, "日期格式不正确")
         with connect() as conn:
             carried_count = ensure_morning_carryover(conn, item_date)
-            org_where, org_params = self.organization_current_user_filter(conn, "owner")
+            actor = getattr(self, "api_user", None)
+            target_user_id = (query.get("user_id") or [None])[0]
+            org_where, org_params = self.organization_workbench_user_filter(
+                conn, "owner", actor, target_user_id
+            )
             items = rows_to_list(
                 conn.execute(
                     f"""
@@ -1062,11 +1064,13 @@ class CollaborationHandlerMixin:
         for template in templates:
             template["items"] = item_map.get(template["id"], [])
             template["inherited"] = template["org_unit_id"] not in visible_ids
+            template["can_manage"] = bool(
+                template["org_unit_id"] == context["selected"]["id"]
+                and (user["role"] == "admin" or template["created_by"] == user["id"])
+            )
         return templates
 
     def create_process_template(self, user):
-        if user["role"] != "admin":
-            raise AppError(403, "仅管理员可以维护流程模板")
         data = read_json(self)
         name = str(data.get("name") or "").strip()
         description = str(data.get("description") or "").strip()
@@ -1110,8 +1114,6 @@ class CollaborationHandlerMixin:
         return {"message": "流程模板已创建", "templates": self.list_process_templates(user)}
 
     def update_process_template(self, template_id, user):
-        if user["role"] != "admin":
-            raise AppError(403, "仅管理员可以维护流程模板")
         data = read_json(self)
         with connect() as conn:
             template = conn.execute(
@@ -1120,7 +1122,9 @@ class CollaborationHandlerMixin:
             ).fetchone()
             if not template:
                 raise AppError(404, "流程模板不存在")
-            self.require_org_unit_access(conn, template["org_unit_id"], user)
+            self.require_current_org_unit_access(conn, template["org_unit_id"], user)
+            if user["role"] != "admin" and template["created_by"] != user["id"]:
+                raise AppError(403, "只能修改自己创建的流程模板")
             expected_version = data.get("expected_version")
             if expected_version is not None and int(expected_version) != int(template["version"]):
                 raise AppError(409, "流程模板已被其他人修改，请刷新后重试")
@@ -1167,8 +1171,6 @@ class CollaborationHandlerMixin:
         return {"message": "流程模板已更新", "templates": self.list_process_templates(user)}
 
     def delete_process_template(self, template_id, user):
-        if user["role"] != "admin":
-            raise AppError(403, "仅管理员可以维护流程模板")
         with connect() as conn:
             template = conn.execute(
                 "SELECT * FROM process_templates WHERE id=? AND active=1",
@@ -1176,7 +1178,9 @@ class CollaborationHandlerMixin:
             ).fetchone()
             if not template:
                 raise AppError(404, "流程模板不存在")
-            self.require_org_unit_access(conn, template["org_unit_id"], user)
+            self.require_current_org_unit_access(conn, template["org_unit_id"], user)
+            if user["role"] != "admin" and template["created_by"] != user["id"]:
+                raise AppError(403, "只能停用自己创建的流程模板")
             instance_count = conn.execute(
                 "SELECT COUNT(*) FROM process_instances WHERE template_id=?",
                 (template_id,),

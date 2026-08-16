@@ -324,19 +324,82 @@ def main():
                 org_path="ess/mo",
             ).get("types") or []
             if topic_types:
-                expect_http_status(
+                option_result = request_json(
                     admin_opener,
                     base_url,
                     "/api/meeting-topic-options",
-                    400,
                     "POST",
                     {
                         "type_id": topic_types[0]["id"],
-                        "title": "Cross-level owner must be rejected",
+                        "title": "上层会议协调下级责任人",
                         "owner_id": ws_user_id,
                     },
                     "ess/mo",
                 )
+                created_option = next(
+                    option
+                    for topic in option_result.get("types") or []
+                    for option in topic.get("options") or []
+                    if option.get("title") == "上层会议协调下级责任人"
+                )
+                if created_option.get("owner_id") != ws_user_id:
+                    raise RuntimeError(f"Descendant meeting owner was not retained: {created_option}")
+            coordination_users = request_json(
+                admin_opener,
+                base_url,
+                "/api/users/coordination",
+                org_path="ess/mo",
+            ).get("users") or []
+            coordination_ids = {item["id"] for item in coordination_users}
+            if not {user_id, ws_user_id, rs_user_id}.issubset(coordination_ids):
+                raise RuntimeError(f"Parent coordination list missed descendants: {coordination_users}")
+            ws_topic_ids = {
+                item["id"]
+                for item in request_json(
+                    admin_opener, base_url, "/api/meeting-topics", org_path="ess/mo/ws"
+                ).get("types") or []
+            }
+            if ws_topic_ids.intersection({item["id"] for item in topic_types}):
+                raise RuntimeError("Meeting topic libraries leaked across teams")
+            mo_machines = request_json(
+                admin_opener,
+                base_url,
+                "/api/machines",
+                "POST",
+                {"name": "MO 专属机台"},
+                "ess/mo",
+            )["machines"]
+            mo_machine = next(item for item in mo_machines if item["name"] == "MO 专属机台")
+            ws_machine_ids = {
+                item["id"]
+                for item in request_json(
+                    admin_opener, base_url, "/api/machines", org_path="ess/mo/ws"
+                ).get("machines") or []
+            }
+            if mo_machine["id"] in ws_machine_ids:
+                raise RuntimeError("Machine configuration leaked into a child team")
+            root_moment = request_json(
+                admin_opener,
+                base_url,
+                "/api/team-moments",
+                "POST",
+                {
+                    "title": "ESS 上层关键时刻",
+                    "story": "仅在上层团队展示，不向下透传。",
+                    "category": "milestone",
+                    "event_date": app.today_iso(),
+                    "images": [],
+                },
+                "ess",
+            )
+            root_moment_id = next(
+                item["id"] for item in root_moment.get("moments") or [] if item["title"] == "ESS 上层关键时刻"
+            )
+            mo_moments = request_json(
+                admin_opener, base_url, "/api/team-moments", org_path="ess/mo"
+            ).get("moments") or []
+            if root_moment_id in {item["id"] for item in mo_moments}:
+                raise RuntimeError("Upper-level team moment propagated into a child team")
             unrelated_thanks = request_json(
                 admin_opener,
                 base_url,
@@ -356,7 +419,7 @@ def main():
             temporary = next(item for item in created.get("units") or [] if item["name"] == "TMP")
             request_json(admin_opener, base_url, f"/api/org-units/{temporary['id']}", "PATCH", {"name": "TMP2", "slug": "tmp2"}, "ess")
             request_json(admin_opener, base_url, f"/api/org-units/{temporary['id']}", "DELETE", org_path="ess")
-            print(json.dumps({"status": "ok", "mo_members": sorted(member_names), "member_drag_order": True, "current_level_scope": True, "cross_team_vote_hidden": cross_vote_id, "morning_version_refresh": True, "inherited_announcement": root_announcement_id, "route": "/org/ess/mo/ws"}, ensure_ascii=False))
+            print(json.dumps({"status": "ok", "mo_members": sorted(member_names), "member_drag_order": True, "current_level_scope": True, "team_owned_configuration_isolated": True, "descendant_coordination": True, "cross_team_vote_hidden": cross_vote_id, "morning_version_refresh": True, "inherited_announcement": root_announcement_id, "route": "/org/ess/mo/ws"}, ensure_ascii=False))
         finally:
             server.shutdown()
             thread.join(timeout=5)
