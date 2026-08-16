@@ -34,7 +34,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 | 表 | 用途 |
 | --- | --- |
-| `users` | 账号、姓名、角色、用户类型、密码哈希、认证来源、企业身份标识、SSO 建议组织和启用状态 |
+| `users` | 账号、姓名、角色、用户类型、密码哈希、认证来源、企业身份标识、SSO 建议组织、早例会顺序和启用状态 |
 | `org_units` | 可配置组织树、路由标识、可见范围、默认用户类型与 SSO 群组映射 |
 | `user_types` | 管理员自定义的用户类型、版本号、四类业务参与开关，以及保留的 `guest` 访客模板 |
 | `module_permissions` | 用户类型对模块的查看、新增、修改、删除权限 |
@@ -47,11 +47,11 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 `users.employee_id` 保存工号并使用不区分大小写的唯一索引，是 SSO 与用户管理的业务关联键。企业身份使用 `users.auth_source='oidc'` 或 `'oauth2'`，并以唯一的 `external_subject=<provider>|<sub>` 保存稳定身份；工号变化时仍可通过主体识别用户，但发生工号冲突会拒绝登录。`suggested_org_unit_id` 保存最近一次 SSO 群组匹配出的建议组织，`sso_groups_json` 和 `sso_last_login_at` 用于管理员核对映射来源；登录本身不会修改现有 `org_unit_id`。管理员确认所属团队后清空建议字段。`sso_login_states.return_to` 只接受 `/` 或 `/org/...` 路径和白名单 `view` 参数，并与一次性 state 一起保存，防止开放重定向；登录成功或失败均使用该目标返回。登录事务成功或过期后会被清理；Client Secret 存在 `system_settings` 或进程环境变量中，API 永不回显明文。
 
-`users.org_unit_id` 指向账号所属组织。`org_units.parent_id` 构成树，兄弟节点的 `slug` 唯一，完整路由由祖先 slug 组合生成。`visibility_mode` 为 `all/subtree/unit`；`sso_groups` 保存 JSON 数组。`team_posts.org_unit_id` 和 `meetings.org_unit_id` 记录内容创建时的组织上下文：会议和公告可向后代组织只读透传，写入仍以原组织为准。其余以用户为主体的数据通过关联用户组织过滤。`thank_you_votes` 同时关联发送人和接收人，用于计算跨团队动态可见范围；排名归属始终取接收人组织。
+`users.org_unit_id` 指向账号所属组织。`users.morning_sort_order` 保存账号在所属组织早例会中的显示顺序，索引 `idx_users_morning_order` 支持按组织稳定读取。`org_units.parent_id` 构成树，兄弟节点的 `slug` 唯一，完整路由由祖先 slug 组合生成。`visibility_mode` 为 `all/subtree/unit`；`sso_groups` 保存 JSON 数组。`team_posts.org_unit_id` 和 `meetings.org_unit_id` 记录内容创建时的组织上下文：会议和公告可向后代组织只读透传，写入仍以原组织为准。早例会、排班、签到、红黑榜和 Thank You 通过关联用户的 `org_unit_id` 只匹配当前选中组织；Thank You 记录要求发送人和接收人同时属于该组织。
 
 组织调整不会隐式修改历史事实。需要将旧组织下的讨论或会议迁入新组织时，使用 `scripts/migrate_org_data.py`；脚本默认只预览，执行前创建 SQLite 备份，并记录逐行迁移清单供回滚。
 
-`user_types.include_in_members/include_in_morning/include_in_rules/include_in_thanks` 控制当前名单展示与新业务数据写入，不删除历史事实。`user_types.version` 和 `morning_items.version` 用于乐观并发控制，更新语句必须同时匹配客户端读取到的版本号。
+`user_types.include_in_members/include_in_morning/include_in_rules/include_in_thanks` 控制当前名单展示与新业务数据写入，不删除历史事实。`user_types.version` 和 `morning_items.version` 用于乐观并发控制，更新语句必须同时匹配客户端读取到的版本号。早例会轻量 `version_token` 不单独持久化，而是由相关事项版本、更新时间、数量和当前人员顺序计算，避免每个轮询请求写数据库。
 
 ### 团队交流
 
@@ -184,3 +184,18 @@ python scripts\db_snapshot.py `
 - 不把数据库放在公开共享目录；
 - 不在截图、Issue 或日志中暴露账号、事实依据和审计详情；
 - 对外提供服务前必须增加 HTTPS、访问控制和安全加固。
+
+## 9. 灰度规模化数据
+
+`scripts/seed_scale_mock.py` 用于在灰度数据库中构造 100 人规模的数据分布。它不是启动迁移，也不会由正式服务自动执行。
+
+脚本使用以下边界避免污染真实数据：
+
+- 仅允许数据库路径位于 `gray` 目录或文件名以 `_gray.db` 结尾；
+- 通过 SQLite Backup API 在写入前创建快照；
+- 真实账号不删除、不改密码，只补充 `mock###` 账号；
+- 重建业务数据时只处理 `[MOCK]`、`MOCK-` 及 Mock 账号关联的数据；
+- 所有模块写入在单个事务中完成，任何异常都会整体回滚；
+- 结束时执行外键检查和 `quick_check`。
+
+灰度发布会重建灰度数据库，因此正确顺序是“部署灰度 -> 生成 Mock -> 体验与压测”。不要把 Mock 灰度库作为生产备份或组织迁移数据源。

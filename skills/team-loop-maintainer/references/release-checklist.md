@@ -22,11 +22,12 @@
 - Verify bulk account-type changes and confirm excluded users disappear only from current business lists while history remains.
 - Verify organization `all/subtree/unit` scopes, bulk organization assignment, nested `/org/...` routes, scoped business writes, and blocked deletion of organizations with children or active users.
 - Verify the sidebar organization tree expands and collapses by branch, defaults to the selected path, closes after selection/outside click, and does not overflow at desktop, medium, or mobile widths.
-- Verify upper meetings and announcements appear read-only in descendants, ordinary discussions do not inherit, descendants can reply/react to inherited announcements, cross-team Thank You appears for both parties and common ancestors, and unrelated sibling teams cannot see it.
+- Verify upper meetings and announcements appear read-only in descendants and ordinary discussions do not inherit. Confirm morning, shift, attendance, red/black and Thank You lists contain only direct members of the selected organization, including for administrators with subtree access.
 - If SSO organization mapping changed, verify deepest-group matching creates a suggestion only, existing-user organizations never change during login, new users stay at root, administrators can adopt suggestions individually and in bulk, and redirect uses the current formal organization route.
 - If authentication changed, run `python scripts\sso_smoke_test.py`; confirm existing employee IDs link without duplicates, new identities are read-only pending accounts, administrator classification clears the pending state, local fallback remains available, auto login cannot loop, the original organization route and module survive SSO, external return targets are rejected, and no SSO secret or endpoint appears in `/api/me`.
 - Run `python scripts\sso_pool_smoke_test.py`; verify concurrent requests stay within the configured per-origin connection limit and concurrent Discovery calls collapse to one provider request.
 - Run `python scripts\morning_retention_smoke_test.py`; verify Friday completions remain visible on Monday and disappear on Tuesday while unfinished items continue carrying forward.
+- Open morning meeting in two sessions: update in one, confirm the other detects the lightweight version and refreshes automatically when idle, but preserves active form input and shows a manual refresh state while editing. Verify right-side member navigation jumps correctly, drag ordering persists, and arrow controls work on touch/keyboard layouts.
 - Verify manual SSO mode clearly groups OAuth2 authorization, Access Token and UserInfo addresses, reports missing required fields without submitting, and keeps a blank Client Secret unchanged.
 - If organization migration changed, run `python scripts\org_data_migration_test.py`; preview a gray database, confirm apply creates both backup and manifest, and verify manifest rollback restores every moved row.
 - If proxy or cookie handling changed, run `python scripts\proxy_smoke_test.py`; confirm direct HTTP login returns 426, HTTPS forwarding produces Secure cookies, and the forwarded client IP is stored. Validate Nginx with `nginx -t` before reload.
@@ -47,6 +48,7 @@
 - Confirm the document itself has no horizontal overflow; calendars, tables, flow trees, and mind maps may scroll only inside their own containers.
 - Confirm mobile account controls expand correctly, the active navigation item scrolls into view, dialogs fit `100dvh`, and edge popovers remain inside the viewport.
 - Verify gray writes do not appear in production.
+- When using 100-person preview data, run `scripts/seed_scale_mock.py` only after Gray deployment; confirm exactly 100 active users, a clean foreign-key check and `quick_check=ok`, then verify dense member, morning, meeting, shift, score, Thank You, forum, process, link and moment views. Never promote that gray database.
 - Re-run Gray once when deployment scripts or migrations changed; repeated deployment must work on Windows.
 
 ## Before commit and push

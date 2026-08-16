@@ -196,6 +196,15 @@ class RequestHandlerMixin:
         placeholders = ",".join("?" for _ in visible_ids)
         return f"{user_alias}.org_unit_id IN ({placeholders})", visible_ids
 
+    def organization_current_user_filter(self, conn, user_alias="u", user=None):
+        """Limit people-centric modules to direct members of the selected unit."""
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        selected = context.get("selected") or {}
+        selected_id = selected.get("id")
+        if not selected_id:
+            return "1=0", []
+        return f"{user_alias}.org_unit_id=?", [selected_id]
+
     def organization_entity_filter(self, conn, column, user=None, inherit_ancestors=False):
         context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
         visible_ids = set(context["visible_ids"])
@@ -219,6 +228,13 @@ class RequestHandlerMixin:
         context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
         if org_unit_id not in context["visible_ids"]:
             raise AppError(404, "记录不存在或无权访问")
+        return context
+
+    def require_current_org_unit_access(self, conn, org_unit_id, user=None):
+        context = self.organization_context(conn, user if user is not None else getattr(self, "api_user", None))
+        selected_id = (context.get("selected") or {}).get("id")
+        if not selected_id or org_unit_id != selected_id:
+            raise AppError(404, "当前团队下未找到该成员内容")
         return context
 
     def require_team_post_read_access(self, conn, post_id, user=None):
@@ -639,6 +655,10 @@ class RequestHandlerMixin:
                 return self.list_morning_items(query)
             if method == "POST":
                 return self.create_morning_item(user)
+        if path == "/api/morning-items/version" and method == "GET":
+            return self.morning_items_version(query)
+        if path == "/api/morning-items/order" and method == "PATCH":
+            return self.update_morning_order(user)
         if len(parts) == 4 and parts[:2] == ["api", "morning-items"] and parts[3] == "history" and method == "GET":
             return self.list_morning_item_history(int(parts[2]))
         if len(parts) == 3 and parts[:2] == ["api", "morning-items"] and method == "PATCH":
@@ -688,7 +708,10 @@ class RequestHandlerMixin:
 
         if path == "/api/meetings":
             if method == "GET":
-                return {"meetings": self.list_meetings(query)}
+                return {
+                    "meetings": self.list_meetings(query),
+                    "attendance_users": self.list_current_organization_users(user),
+                }
             if method == "POST":
                 return self.create_meeting(user)
         if path == "/api/meetings/bulk-generate" and method == "POST":
@@ -753,7 +776,10 @@ class RequestHandlerMixin:
 
         if path == "/api/shifts":
             if method == "GET":
-                return {"shifts": self.list_shifts(query)}
+                return {
+                    "shifts": self.list_shifts(query),
+                    "users": self.list_current_organization_users(user),
+                }
             if method == "POST":
                 return self.create_shift()
         if len(parts) == 3 and parts[:2] == ["api", "shifts"] and method == "DELETE":
@@ -763,7 +789,7 @@ class RequestHandlerMixin:
 
         if path == "/api/thank-you":
             if method == "GET":
-                return {"votes": self.list_thank_you(query, user), "users": self.list_participating_users("thanks", user, collaboration=True)}
+                return {"votes": self.list_thank_you(query, user), "users": self.list_participating_users("thanks", user)}
             if method == "POST":
                 return self.create_thank_you(user)
         if len(parts) == 3 and parts[:2] == ["api", "thank-you"]:

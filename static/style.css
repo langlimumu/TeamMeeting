@@ -456,8 +456,8 @@ body[data-theme] .moments-panel {
   min-height: 190px;
   padding: 30px 34px;
   border: 0;
-  border-bottom: 5px solid #d6aa4c;
-  background: #171923;
+  border-bottom: 5px solid #5b76fe;
+  background: #fff1a8;
 }
 
 .moments-head-copy {
@@ -467,13 +467,13 @@ body[data-theme] .moments-panel {
 .moments-eyebrow {
   display: block;
   margin-bottom: 12px;
-  color: #e8c87a;
+  color: #3451d1;
   font-size: 12px;
   font-weight: 800;
 }
 
 .moments-head h2 {
-  color: #fff;
+  color: #172554;
   font-size: clamp(28px, 3vw, 40px);
   line-height: 1.2;
 }
@@ -481,7 +481,7 @@ body[data-theme] .moments-panel {
 .moments-head p {
   max-width: 650px;
   margin-top: 12px;
-  color: #cbd1dc;
+  color: #475569;
   font-size: 15px;
   line-height: 1.7;
 }
@@ -492,26 +492,27 @@ body[data-theme] .moments-panel {
 
 .moments-head-actions #momentCreateButton {
   min-height: 40px;
-  border: 1px solid #e8c87a;
-  background: #e8c87a;
-  color: #171923;
+  border: 1px solid #3451d1;
+  background: #3451d1;
+  color: #fff;
   font-weight: 800;
 }
 
 .moments-head .moment-view-switch {
-  border-color: #454b59;
-  background: #262a35;
+  border-color: #c7d2fe;
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .moments-head .moment-view-switch button,
 body[data-theme] .moments-head .moment-view-switch button {
-  color: #cbd1dc;
+  color: #475569;
 }
 
 .moments-head .moment-view-switch button.active,
 body[data-theme] .moments-head .moment-view-switch button.active {
   background: #fff;
-  color: #171923;
+  color: #3451d1;
+  box-shadow: 0 1px 4px rgba(52, 81, 209, 0.18);
 }
 
 .moment-summary {
@@ -2469,6 +2470,18 @@ main {
   min-height: 78px;
 }
 
+@media (min-width: 1181px) and (max-width: 1360px) {
+  .morning-create-form,
+  body[data-theme] .morning-create-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .morning-create-form textarea,
+  .morning-create-form textarea[name="blocker"] {
+    grid-column: auto;
+  }
+}
+
 .morning-choice-field {
   display: grid;
   gap: 7px;
@@ -2607,6 +2620,143 @@ main {
 .morning-list {
   display: grid;
   gap: 12px;
+  min-width: 0;
+}
+
+.morning-board-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 224px;
+  gap: 14px;
+  align-items: start;
+}
+
+.morning-navigator {
+  position: sticky;
+  top: 18px;
+  max-height: calc(100vh - 108px);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: var(--shadow-soft);
+}
+
+.morning-navigator-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  padding: 11px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.morning-navigator-head strong,
+.morning-navigator-head small {
+  display: block;
+}
+
+.morning-navigator-head small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.morning-navigator-head small.has-update {
+  color: #b42318;
+  font-weight: 700;
+}
+
+.morning-navigator-list {
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px;
+}
+
+.morning-navigator-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px;
+  align-items: center;
+  min-height: 36px;
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.morning-navigator-item:hover {
+  background: #f4f7ff;
+}
+
+.morning-navigator-item.is-filtered {
+  opacity: 0.45;
+}
+
+.morning-navigator-item.is-dragging {
+  opacity: 0.5;
+}
+
+.morning-navigator-item.is-drop-target {
+  background: #eaf0ff;
+  box-shadow: inset 0 0 0 1px var(--blue);
+}
+
+.morning-nav-drag {
+  cursor: grab;
+  color: #8a94a6;
+  font-size: 12px;
+}
+
+.morning-nav-jump {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  padding: 6px;
+  color: var(--ink);
+  text-align: left;
+  box-shadow: none;
+}
+
+.morning-nav-jump:hover {
+  background: transparent;
+  color: var(--blue);
+}
+
+.morning-nav-jump span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.morning-nav-jump small {
+  color: var(--muted);
+}
+
+.morning-nav-order-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.morning-nav-order-actions button {
+  width: 24px;
+  min-width: 24px;
+  height: 26px;
+  padding: 0;
+  border-color: var(--line);
+  background: #fff;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.morning-person-row {
+  scroll-margin-top: 18px;
+}
+
+.morning-person-row.is-navigated {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.16), var(--shadow-soft);
 }
 
 .morning-person-row {
@@ -2616,6 +2766,39 @@ main {
   padding: 14px;
   box-shadow: var(--shadow-soft);
   min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .morning-board-layout {
+    display: flex;
+    flex-direction: column-reverse;
+  }
+
+  .morning-navigator {
+    position: sticky;
+    top: 8px;
+    z-index: 4;
+    width: 100%;
+    max-height: none;
+  }
+
+  .morning-navigator-head {
+    padding: 8px 10px;
+  }
+
+  .morning-navigator-list {
+    display: flex;
+    gap: 4px;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 5px;
+  }
+
+  .morning-navigator-item {
+    flex: 0 0 auto;
+    min-width: 142px;
+  }
 }
 
 .morning-person-head {
@@ -2787,6 +2970,51 @@ main {
 
 .morning-item-actions .pill {
   white-space: nowrap;
+}
+
+@media (min-width: 1181px) and (max-width: 1500px) {
+  .morning-list-head {
+    display: none;
+  }
+
+  .morning-list-item,
+  .morning-list-item-form,
+  body[data-theme] .morning-list-item,
+  body[data-theme] .morning-list-item-form {
+    grid-template-columns: 132px minmax(0, 0.95fr) minmax(0, 1.05fr);
+    align-items: stretch;
+  }
+
+  .morning-list-item .morning-status-cell,
+  .morning-list-item-form .morning-status-cell {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .morning-list-item .morning-title-cell,
+  .morning-list-item-form .morning-title-cell {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .morning-list-item .morning-detail-cell,
+  .morning-list-item-form .morning-detail-cell {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .morning-list-item .morning-risk-cell,
+  .morning-list-item-form .morning-risk-cell {
+    grid-column: 2;
+    grid-row: 2;
+  }
+
+  .morning-list-item .morning-item-actions,
+  .morning-list-item-form .morning-item-actions {
+    grid-column: 3;
+    grid-row: 2;
+    align-self: end;
+  }
 }
 
 .morning-item-head {

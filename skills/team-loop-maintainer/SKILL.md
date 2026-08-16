@@ -45,7 +45,7 @@ Use these references conditionally:
 - Treat user types as administrator-defined data. Never branch business behavior on a display name or assume fixed internal/partner type keys.
 - Keep module permissions separate from business participation scopes (`members`, `morning`, `rules`, `thanks`); enforce both in backend queries and writes.
 - Keep organization visibility separate from user-type permissions. Resolve `/org/...` through `organization_context()`, treat `X-Team-Org-Path` as an untrusted selection, and scope every people-centered read and write on the server.
-- Separate direct visibility, inherited ancestors, and same-root collaboration. Only meetings and announcement topics inherit downward, inherited records stay read-only, and cross-team Thank You activity is visible to sender, receiver, and common ancestors while rankings belong to the receiver scope.
+- Separate direct members, inherited ancestors, and broader route visibility. Only meetings and announcement topics inherit downward; morning items, shifts, attendance, red/black scores, and Thank You candidates/activity/rankings must use direct members of the selected organization.
 - Test admin view, admin user view, at least two custom user types, and the dynamic guest template when the change affects access.
 
 ### Backend and data
@@ -58,8 +58,10 @@ Use these references conditionally:
 - Preserve WAL, per-request connections, busy timeout, bounded HTTP workers, and the one-minute session-touch throttle when changing concurrency-sensitive code.
 - Preserve the bounded per-origin SSO HTTP pool, same-origin redirect protection, and Discovery cache stampede guard. Run both SSO smoke tests after changing identity-provider networking.
 - Keep completed morning items visible for exactly the next Monday-Friday workday as read-only review rows; do not create another persisted carryover row for completed work.
+- Poll only the lightweight morning version endpoint. Auto-refresh the full list only when no editor is active; otherwise show a pending-update state. Validate morning ordering against the complete direct-member participant set and keep drag plus arrow controls.
 - Never commit or manually overwrite files under `data/`.
 - Never test destructive migrations against the production database.
+- Generate large preview data only with `scripts/seed_scale_mock.py` after Gray deployment. Keep its gray-only path guard, SQLite backup, `[MOCK]` ownership markers, repeatable cleanup, single transaction, and post-write integrity checks intact.
 
 ### Cross-module behavior
 
@@ -109,6 +111,15 @@ For database or deployment changes, deploy Gray and test against its isolated sn
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gray
 python scripts\safety_feature_test.py --base-url http://127.0.0.1:8001 --database data\deploy\gray\weekly_team_gray.db
 ```
+
+For 100-person list and density checks, run the scale seed only after the Gray snapshot is ready:
+
+```powershell
+python scripts\seed_scale_mock.py --dry-run
+python scripts\seed_scale_mock.py
+```
+
+Never run the scale seed against production, promote its database, or commit its database and backup files.
 
 Do not promote or push unless the user explicitly asks.
 

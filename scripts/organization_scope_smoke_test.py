@@ -155,8 +155,8 @@ def main():
                 f"/api/dashboards/thank-you?from={app.week_start(app.today_iso())}&to={app.week_start(app.today_iso())}",
                 org_path="ess/mo/ws",
             )
-            if [item["display_name"] for item in dashboard.get("stars") or []] != ["WS成员"]:
-                raise RuntimeError(f"Thank You organization ranking failed: {dashboard}")
+            if dashboard.get("stars") or dashboard.get("weekly"):
+                raise RuntimeError(f"Cross-level Thank You leaked into current-level ranking: {dashboard}")
             mo_posts = request_json(opener, base_url, "/api/team-posts", org_path="ess/mo").get("posts") or []
             inherited_announcement = next((item for item in mo_posts if item["id"] == root_announcement_id), None)
             if not inherited_announcement or not inherited_announcement.get("inherited"):
@@ -170,13 +170,43 @@ def main():
             inherited_meeting = next((item for item in mo_meetings if item["id"] == root_meeting_id), None)
             if not inherited_meeting or not inherited_meeting.get("inherited"):
                 raise RuntimeError(f"Upper meeting did not propagate to MO: {mo_meetings}")
-            for path in (
+            mo_morning = request_json(
+                opener,
+                base_url,
                 f"/api/morning-items?date={app.today_iso()}",
-                f"/api/scores?from={app.today_iso()}&to={app.today_iso()}",
-                f"/api/dashboards/red-black?from={app.today_iso()}&to={app.today_iso()}",
+                org_path="ess/mo",
+            )
+            if {item["id"] for item in mo_morning.get("users") or []} != {user_id}:
+                raise RuntimeError(f"MO morning list leaked another organization level: {mo_morning.get('users')}")
+            mo_shifts = request_json(
+                opener,
+                base_url,
                 f"/api/shifts?from={app.today_iso()}&to={app.today_iso()}",
-                f"/api/dashboards/shifts?from={app.today_iso()}&to={app.today_iso()}",
+                org_path="ess/mo",
+            )
+            if {item["id"] for item in mo_shifts.get("users") or []} != {user_id}:
+                raise RuntimeError(f"MO shift picker leaked another organization level: {mo_shifts.get('users')}")
+            mo_meeting_payload = request_json(
+                opener,
+                base_url,
                 f"/api/meetings?from={app.today_iso()}&to={app.today_iso()}",
+                org_path="ess/mo",
+            )
+            if {item["id"] for item in mo_meeting_payload.get("attendance_users") or []} != {user_id}:
+                raise RuntimeError(
+                    f"MO attendance list leaked another organization level: {mo_meeting_payload.get('attendance_users')}"
+                )
+            mo_rule_dashboard = request_json(
+                opener,
+                base_url,
+                f"/api/dashboards/red-black?from={app.today_iso()}&to={app.today_iso()}",
+                org_path="ess/mo",
+            )
+            if {item["id"] for item in mo_rule_dashboard.get("annual") or []} != {user_id}:
+                raise RuntimeError(f"MO red-black list leaked another organization level: {mo_rule_dashboard.get('annual')}")
+            for path in (
+                f"/api/scores?from={app.today_iso()}&to={app.today_iso()}",
+                f"/api/dashboards/shifts?from={app.today_iso()}&to={app.today_iso()}",
                 "/api/team-posts",
             ):
                 request_json(opener, base_url, path, org_path="ess/mo")
@@ -200,10 +230,35 @@ def main():
                 f"/api/thank-you?from={app.week_start(app.today_iso())}&to={app.week_start(app.today_iso())}",
                 org_path="ess/mo/ws",
             )
-            if cross_vote_id not in {item["id"] for item in ws_thanks.get("votes") or []}:
-                raise RuntimeError(f"Sender team cannot see cross-team Thank You: {ws_thanks}")
-            if rs_user_id not in {item["id"] for item in ws_thanks.get("users") or []}:
-                raise RuntimeError(f"Cross-team recipient is not selectable: {ws_thanks.get('users')}")
+            if cross_vote_id in {item["id"] for item in ws_thanks.get("votes") or []}:
+                raise RuntimeError(f"Cross-team Thank You leaked into sender team: {ws_thanks}")
+            if rs_user_id in {item["id"] for item in ws_thanks.get("users") or []}:
+                raise RuntimeError(f"Cross-team recipient leaked into current-level picker: {ws_thanks.get('users')}")
+            morning_before = request_json(
+                ws_opener,
+                base_url,
+                f"/api/morning-items?date={app.today_iso()}",
+                org_path="ess/mo/ws",
+            )
+            if {item["id"] for item in morning_before.get("users") or []} != {ws_user_id}:
+                raise RuntimeError(f"Morning participants were not limited to the current level: {morning_before.get('users')}")
+            version_before = morning_before.get("version_token")
+            request_json(
+                ws_opener,
+                base_url,
+                "/api/morning-items",
+                "POST",
+                {"title": "WS 当日事项", "item_date": app.today_iso(), "status": "doing"},
+                "ess/mo/ws",
+            )
+            version_after = request_json(
+                ws_opener,
+                base_url,
+                f"/api/morning-items/version?date={app.today_iso()}",
+                org_path="ess/mo/ws",
+            ).get("version_token")
+            if not version_before or version_before == version_after:
+                raise RuntimeError("Morning lightweight version did not change after an update")
             request_json(
                 ws_opener,
                 base_url,
@@ -228,8 +283,8 @@ def main():
                 f"/api/thank-you?from={app.week_start(app.today_iso())}&to={app.week_start(app.today_iso())}",
                 org_path="ess/mo/rs",
             )
-            if cross_vote_id not in {item["id"] for item in rs_thanks.get("votes") or []}:
-                raise RuntimeError(f"Receiver team cannot see cross-team Thank You: {rs_thanks}")
+            if cross_vote_id in {item["id"] for item in rs_thanks.get("votes") or []}:
+                raise RuntimeError(f"Cross-team Thank You leaked into receiver team: {rs_thanks}")
             with opener.open(f"{base_url}/org/ess/mo/ws", timeout=15) as response:
                 if b'id="appView"' not in response.read():
                     raise RuntimeError("Organization route did not serve the SPA")
@@ -252,6 +307,36 @@ def main():
             ).get("members") or []
             if [item["id"] for item in reordered_members] != reversed_member_ids:
                 raise RuntimeError(f"Organization-scoped member sorting failed: {reordered_members}")
+            reordered_morning = request_json(
+                admin_opener,
+                base_url,
+                "/api/morning-items/order",
+                "PATCH",
+                {"user_ids": [user_id], "date": app.today_iso()},
+                "ess/mo",
+            )
+            if [item["id"] for item in reordered_morning.get("users") or []] != [user_id]:
+                raise RuntimeError(f"Organization-scoped morning sorting failed: {reordered_morning.get('users')}")
+            topic_types = request_json(
+                admin_opener,
+                base_url,
+                "/api/meeting-topics",
+                org_path="ess/mo",
+            ).get("types") or []
+            if topic_types:
+                expect_http_status(
+                    admin_opener,
+                    base_url,
+                    "/api/meeting-topic-options",
+                    400,
+                    "POST",
+                    {
+                        "type_id": topic_types[0]["id"],
+                        "title": "Cross-level owner must be rejected",
+                        "owner_id": ws_user_id,
+                    },
+                    "ess/mo",
+                )
             unrelated_thanks = request_json(
                 admin_opener,
                 base_url,
@@ -271,7 +356,7 @@ def main():
             temporary = next(item for item in created.get("units") or [] if item["name"] == "TMP")
             request_json(admin_opener, base_url, f"/api/org-units/{temporary['id']}", "PATCH", {"name": "TMP2", "slug": "tmp2"}, "ess")
             request_json(admin_opener, base_url, f"/api/org-units/{temporary['id']}", "DELETE", org_path="ess")
-            print(json.dumps({"status": "ok", "mo_members": sorted(member_names), "member_drag_order": True, "ws_star": "WS成员", "cross_team_vote": cross_vote_id, "inherited_announcement": root_announcement_id, "route": "/org/ess/mo/ws"}, ensure_ascii=False))
+            print(json.dumps({"status": "ok", "mo_members": sorted(member_names), "member_drag_order": True, "current_level_scope": True, "cross_team_vote_hidden": cross_vote_id, "morning_version_refresh": True, "inherited_announcement": root_announcement_id, "route": "/org/ess/mo/ws"}, ensure_ascii=False))
         finally:
             server.shutdown()
             thread.join(timeout=5)

@@ -29,8 +29,13 @@ const state = {
   linkCategories: [],
   links: [],
   meetings: [],
+  meetingUsers: [],
   morningItems: [],
   morningUsers: [],
+  morningVersionToken: "",
+  morningUpdatePending: false,
+  morningLoading: false,
+  morningLoadId: 0,
   processTemplates: [],
   processInstances: [],
   processScope: "mine",
@@ -63,6 +68,8 @@ const state = {
   archiveYears: [],
   archiveResults: [],
   shifts: [],
+  shiftUsers: [],
+  ruleUsers: [],
   activeShiftPopoverDate: null,
   personalMorningMonthItems: [],
   activePersonalMorningChain: null,
@@ -321,6 +328,13 @@ async function selectOrganizationPath(path) {
   state.organization.selected = unit;
   renderOrganizationSwitcher();
   state.thankUsers = [];
+  state.morningItems = [];
+  state.morningUsers = [];
+  state.meetingUsers = [];
+  state.shiftUsers = [];
+  state.ruleUsers = [];
+  state.morningVersionToken = "";
+  state.morningUpdatePending = false;
   await refreshAll();
 }
 
@@ -862,15 +876,17 @@ async function loadReferenceData() {
 function populateSelects() {
   const selectUsers = state.users.length ? state.users : state.morningUsers.map((user) => ({ ...user, active: 1 }));
   const activeUsers = selectUsers.filter((user) => user.active !== 0);
-  const eligibleUsers = (scope) => activeUsers.filter((user) => user[`eligible_${scope}`] === undefined || Boolean(user[`eligible_${scope}`]));
   const userOptions = activeUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
-  const morningUsers = state.morningUsers.length ? state.morningUsers : eligibleUsers("morning");
+  const morningUsers = state.morningUsers;
   const morningOptions = morningUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
-  const ruleOptionsUsers = eligibleUsers("rules").map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const ruleUsers = state.ruleUsers;
+  const shiftUsers = state.shiftUsers;
+  const ruleOptionsUsers = ruleUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const shiftOptionsUsers = shiftUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const userOptional = `<option value="">不绑定账号</option>${userOptions}`;
   const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
   const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
-  const thankUsers = (state.thankUsers.length ? state.thankUsers : eligibleUsers("thanks")).filter((user) => user.id !== state.user?.id);
+  const thankUsers = state.thankUsers.filter((user) => user.id !== state.user?.id);
   const thankUserLabel = (user) => user.org_unit_name ? `${user.display_name} · ${user.org_unit_name}` : user.display_name;
   const thankOptions = thankUsers.map((user) => `<option value="${user.id}">${escapeHtml(thankUserLabel(user))}</option>`).join("");
   const topicOptions = state.topics.map((topic) => `<option value="${topic.id}">${escapeHtml(topic.name)}</option>`).join("");
@@ -884,6 +900,7 @@ function populateSelects() {
   $$("[data-users]").forEach((select) => { select.innerHTML = userOptions; });
   $$("[data-morning-users]").forEach((select) => { select.innerHTML = morningOptions; });
   $$("[data-rule-users]").forEach((select) => { select.innerHTML = ruleOptionsUsers; });
+  $$("[data-shift-users]").forEach((select) => { select.innerHTML = shiftOptionsUsers; });
   $$("[data-user-types]").forEach((select) => { select.innerHTML = userTypeOptions; });
   $$("[data-org-units]").forEach((select) => { select.innerHTML = orgOptions; });
   $$("[data-user-type-copy]").forEach((select) => { select.innerHTML = userTypeCopyOptions; });
@@ -916,8 +933,8 @@ function populateSelects() {
   $$("[data-topic-types]").forEach((select) => { select.innerHTML = topicOptions; });
   $$("[data-owner-users]").forEach((select) => {
     const current = select.value;
-    select.innerHTML = renderUserOptions(current);
-    select.value = activeUsers.some((user) => Number(user.id) === Number(current)) ? current : "";
+    select.innerHTML = renderUserOptions(current, "默认负责人", state.meetingUsers);
+    select.value = state.meetingUsers.some((user) => Number(user.id) === Number(current)) ? current : "";
   });
   $$("[data-link-categories], [data-link-edit-categories]").forEach((select) => { select.innerHTML = linkCategoryOptions || '<option value="通用">通用</option>'; });
   const linkFilter = $("#linkCategoryFilter");
@@ -1530,7 +1547,7 @@ function renderMorningSummary() {
 function renderMorningBoard() {
   const board = $("#morningBoard");
   if (!board) return;
-  const users = state.morningUsers.length ? state.morningUsers : state.users;
+  const users = state.morningUsers;
   if (!users.length) {
     board.innerHTML = "<p>暂无成员数据</p>";
     return;
@@ -1564,7 +1581,7 @@ function renderMorningBoard() {
       done: items.filter((item) => item.status === "done").length,
     };
     return `
-      <section class="morning-person-row">
+      <section class="morning-person-row" id="morning-owner-${user.id}" data-morning-owner-id="${user.id}">
         <div class="morning-person-head">
           <div>
             <strong>${escapeHtml(user.display_name)}</strong>
@@ -1590,6 +1607,84 @@ function renderMorningBoard() {
       </section>
     `;
   }).join("");
+}
+
+function renderMorningNavigator() {
+  const list = $("#morningNavigatorList");
+  if (!list) return;
+  const ownerFilter = $("#morningOwnerFilter")?.value || "";
+  const users = state.morningUsers;
+  const counts = new Map();
+  state.morningItems.forEach((item) => counts.set(Number(item.owner_id), (counts.get(Number(item.owner_id)) || 0) + 1));
+  list.innerHTML = users.map((user, index) => `
+    <div class="morning-navigator-item ${ownerFilter && String(user.id) !== String(ownerFilter) ? "is-filtered" : ""}"
+         draggable="${isAdminView()}" data-morning-nav-user-id="${user.id}">
+      ${isAdminView() ? `<span class="morning-nav-drag" title="拖动调整顺序" aria-hidden="true">⋮⋮</span>` : ""}
+      <button class="morning-nav-jump" type="button" data-morning-owner-target="${user.id}">
+        <span>${escapeHtml(user.display_name)}</span><small>${counts.get(Number(user.id)) || 0}</small>
+      </button>
+      ${isAdminView() ? `<span class="morning-nav-order-actions">
+        <button type="button" data-morning-order-user="${user.id}" data-morning-order-direction="up" title="上移" aria-label="上移 ${escapeHtml(user.display_name)}" ${index === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" data-morning-order-user="${user.id}" data-morning-order-direction="down" title="下移" aria-label="下移 ${escapeHtml(user.display_name)}" ${index === users.length - 1 ? "disabled" : ""}>↓</button>
+      </span>` : ""}
+    </div>
+  `).join("") || `<p class="empty-note">暂无早例会成员</p>`;
+  const syncState = $("#morningSyncState");
+  if (syncState) {
+    syncState.textContent = state.morningUpdatePending ? "有新内容，点击刷新" : "自动同步中";
+    syncState.classList.toggle("has-update", state.morningUpdatePending);
+  }
+}
+
+function morningEditorIsActive() {
+  const active = document.activeElement;
+  return Boolean(active?.closest?.("#morningCreatePanel, .morning-item-form"));
+}
+
+async function saveMorningOrder(userIds) {
+  const data = await api("/api/morning-items/order", {
+    method: "PATCH",
+    body: JSON.stringify({ user_ids: userIds, date: state.morningDate }),
+  });
+  state.morningItems = data.items || state.morningItems;
+  state.morningUsers = data.users || state.morningUsers;
+  state.morningVersionToken = data.version_token || state.morningVersionToken;
+  state.morningUpdatePending = false;
+  renderMorning();
+}
+
+async function moveMorningUser(userId, direction) {
+  const ids = state.morningUsers.map((user) => Number(user.id));
+  const index = ids.indexOf(Number(userId));
+  const target = direction === "up" ? index - 1 : index + 1;
+  if (index < 0 || target < 0 || target >= ids.length) return;
+  [ids[index], ids[target]] = [ids[target], ids[index]];
+  await saveMorningOrder(ids);
+}
+
+async function checkMorningUpdates() {
+  if (state.currentPage !== "morning" || document.visibilityState !== "visible" || state.morningLoading || !canLoadModule("morning")) return;
+  try {
+    const data = await api(`/api/morning-items/version?date=${encodeURIComponent(state.morningDate)}`);
+    const token = data.version_token || "";
+    if (!state.morningVersionToken) {
+      state.morningVersionToken = token;
+      return;
+    }
+    if (token === state.morningVersionToken) return;
+    if (morningEditorIsActive()) {
+      state.morningUpdatePending = true;
+      renderMorningNavigator();
+      return;
+    }
+    await loadMorning({ preserveScroll: true });
+  } catch {
+    // A transient polling failure should not interrupt the current meeting view.
+  }
+}
+
+function startMorningPolling() {
+  window.setInterval(checkMorningUpdates, 12000);
 }
 
 function canEditMorningItem(item) {
@@ -1621,8 +1716,8 @@ function renderMorningItem(item) {
             <select name="status">${renderMorningStatusOptions(item.status)}</select>
             <select name="priority">${renderMorningPriorityOptions(item.priority)}</select>
           </div>
-          <input name="title" value="${escapeHtml(item.title)}" placeholder="事项点" required>
-          <textarea name="detail" placeholder="今日进展 / 下一步">${escapeHtml(item.detail || "")}</textarea>
+          <input class="morning-title-cell" name="title" value="${escapeHtml(item.title)}" placeholder="事项点" required>
+          <textarea class="morning-detail-cell" name="detail" placeholder="今日进展 / 下一步">${escapeHtml(item.detail || "")}</textarea>
           <div class="morning-risk-cell">
             <input name="blocker" value="${escapeHtml(item.blocker || "")}" placeholder="风险说明">
             <input name="due_date" type="date" value="${escapeHtml(item.due_date || item.item_date)}">
@@ -1642,12 +1737,12 @@ function renderMorningItem(item) {
             <span class="morning-badge source">${escapeHtml(durationText)}</span>
           </div>
         </div>
-        <div>
+        <div class="morning-title-cell">
           <strong>${escapeHtml(item.title)}</strong>
           <small>更新 ${escapeHtml(shortDateTime(item.updated_at || item.created_at))}</small>
         </div>
-        <p>${escapeHtml(item.detail || "暂无进展说明")}</p>
-        <div>
+        <p class="morning-detail-cell">${escapeHtml(item.detail || "暂无进展说明")}</p>
+        <div class="morning-risk-cell">
           <p class="${item.blocker || item.status === "risk" ? "risk-text" : ""}">风险：${escapeHtml(riskText)}</p>
           <small class="${isMorningDue(item) ? "risk-text" : ""}">${escapeHtml(dueText)}</small>
         </div>
@@ -1748,19 +1843,32 @@ function renderMorning() {
   }
   renderMorningSummary();
   renderMorningBoard();
+  renderMorningNavigator();
   populateSelects();
 }
 
-async function loadMorning() {
+async function loadMorning(options = {}) {
   if (!canLoadModule("morning")) return;
+  const loadId = ++state.morningLoadId;
+  const organizationPath = selectedOrganizationPath();
+  const scrollTop = options.preserveScroll ? window.scrollY : null;
+  state.morningLoading = true;
   const date = $("#morningDate")?.value || state.morningDate || iso(new Date());
   state.morningDate = date;
-  const data = await api(`/api/morning-items?date=${encodeURIComponent(date)}`);
-  state.morningItems = data.items;
-  state.morningUsers = data.users;
-  state.morningReadOnly = Boolean(data.read_only);
-  state.morningCarriedCount = Number(data.carried_count || 0);
-  renderMorning();
+  try {
+    const data = await api(`/api/morning-items?date=${encodeURIComponent(date)}`);
+    if (loadId !== state.morningLoadId || organizationPath !== selectedOrganizationPath()) return;
+    state.morningItems = data.items;
+    state.morningUsers = data.users;
+    state.morningReadOnly = Boolean(data.read_only);
+    state.morningCarriedCount = Number(data.carried_count || 0);
+    state.morningVersionToken = data.version_token || "";
+    state.morningUpdatePending = false;
+    renderMorning();
+    if (scrollTop !== null) requestAnimationFrame(() => window.scrollTo({ top: scrollTop }));
+  } finally {
+    if (loadId === state.morningLoadId) state.morningLoading = false;
+  }
 }
 
 let processTemplateKeySequence = 0;
@@ -3132,7 +3240,7 @@ function renderScoreList(scores) {
           }
           return `<tr>
             <td><input form="scoreEdit${score.id}" name="score_date" type="date" value="${escapeHtml(score.score_date)}"></td>
-            <td><select form="scoreEdit${score.id}" name="user_id">${renderUserOptions(score.user_id, "成员")}</select></td>
+            <td><select form="scoreEdit${score.id}" name="user_id">${renderUserOptions(score.user_id, "成员", state.ruleUsers)}</select></td>
             <td><select form="scoreEdit${score.id}" name="kind"><option value="red" ${score.kind === "red" ? "selected" : ""}>红榜</option><option value="black" ${score.kind === "black" ? "selected" : ""}>黑榜</option></select></td>
             <td><input form="scoreEdit${score.id}" name="points" type="number" min="1" value="${Math.abs(Number(score.points || 0))}"></td>
             <td><select form="scoreEdit${score.id}" name="rule_id">${renderRuleSelectOptions(score.rule_id)}</select></td>
@@ -3260,6 +3368,7 @@ async function loadRulesAndScores() {
     api(`/api/dashboards/red-black?from=${year}-01-01&to=${year}-12-31`),
   ]);
   const scores = scoresData.scores || [];
+  state.ruleUsers = (annualData.annual || []).map((user) => ({ ...user, active: 1 }));
   const renderRuleColumn = (kind, title) => {
     const rules = state.rules.filter((rule) => rule.kind === kind);
     return `<section class="rule-column ${kind}">
@@ -3324,8 +3433,8 @@ function topicOptionsForMeeting(meeting, selectedId = null) {
   return topics.map((topic) => `<option value="${topic.id}" ${Number(selectedId) === Number(topic.id) ? "selected" : ""}>${escapeHtml(topic.name)}</option>`).join("");
 }
 
-function renderUserOptions(selectedId, placeholder = "负责人") {
-  const options = state.users
+function renderUserOptions(selectedId, placeholder = "负责人", users = state.users) {
+  const options = users
     .filter((user) => user.active !== 0)
     .map((user) => `<option value="${user.id}" ${Number(selectedId) === Number(user.id) ? "selected" : ""}>${escapeHtml(user.display_name)}</option>`)
     .join("");
@@ -3343,7 +3452,7 @@ function renderTopicPresetList() {
         ${topic.options.map((option) => `<form class="preset-row preset-form" data-option-id="${option.id}">
           <div class="preset-row-main">
             <input name="title" value="${escapeHtml(option.title)}" placeholder="二级议题名称" required>
-            <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人")}</select>
+            <select name="owner_id">${renderUserOptions(option.owner_id, "默认负责人", state.meetingUsers)}</select>
             <select name="recurrence_rule">${recurrenceOptions(recurrenceRule(option))}</select>
             <span>${Number(option.duration_minutes || 10)} 分钟</span>
             <button>保存</button>
@@ -3376,7 +3485,7 @@ function renderPresetTopicForm(meeting) {
       <select name="type_id" data-meeting-topic-select required>${topicOptionsForMeeting(meeting)}</select>
       <select name="option_id" data-meeting-option-select><option value="">自定义议题</option>${options.map((option) => `<option value="${option.id}">${escapeHtml(option.title)}</option>`).join("")}</select>
       <input name="title" placeholder="自定义标题，选择预设时可留空" />
-      <select name="owner_id">${renderUserOptions(null)}</select>
+      <select name="owner_id">${renderUserOptions(null, "负责人", state.meetingUsers)}</select>
       <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
       <input name="expected_output" placeholder="期望产出，例如形成结论" />
       <input name="materials" placeholder="会前材料、数据或链接" />
@@ -3394,7 +3503,7 @@ function renderCustomTopicForm(meeting) {
     <form class="form-grid compact topic-item-form custom-topic-form" data-meeting-id="${meeting.id}">
       <select name="type_id" required>${topicOptionsForMeeting(meeting)}</select>
       <input name="title" placeholder="自定义议题标题" required />
-      <select name="owner_id">${renderUserOptions(null)}</select>
+      <select name="owner_id">${renderUserOptions(null, "负责人", state.meetingUsers)}</select>
       <input name="duration_minutes" type="number" min="1" max="180" value="10" title="预计时长（分钟）" />
       <input name="expected_output" placeholder="期望产出，例如同步信息" />
       <input name="materials" placeholder="会前材料、数据或链接" />
@@ -3484,7 +3593,7 @@ function openMeetingMinuteModal(itemId, mode = "minutes") {
   form.dataset.itemId = item.id;
   form.dataset.meetingId = meeting.id;
   form.reset();
-  form.elements.owner_id.innerHTML = renderUserOptions(item.owner_id);
+  form.elements.owner_id.innerHTML = renderUserOptions(item.owner_id, "负责人", state.meetingUsers);
   form.elements.owner_id.value = item.owner_id ? String(item.owner_id) : "";
   form.elements.status.innerHTML = renderMeetingItemStatusOptions(item.status || "todo");
   form.elements.status.value = item.status || "todo";
@@ -3569,7 +3678,7 @@ function renderMeetingAgendaPicker(meeting) {
               <input class="meeting-agenda-option-check" type="checkbox" value="${option.id}" ${added ? "disabled" : ""}>
               <span><strong>${escapeHtml(option.title)}</strong><small>${escapeHtml(option.default_detail || option.expected_output || "暂无补充说明")}</small></span>
             </label>
-            <select class="meeting-agenda-owner" disabled aria-label="${escapeHtml(option.title)}责任人">${renderUserOptions(option.owner_id, "选择责任人")}</select>
+            <select class="meeting-agenda-owner" disabled aria-label="${escapeHtml(option.title)}责任人">${renderUserOptions(option.owner_id, "选择责任人", state.meetingUsers)}</select>
             <span class="meeting-agenda-option-meta">${added ? "已加入" : `${Number(option.duration_minutes || 10)} 分钟`}</span>
           </div>`;
         }).join("")}
@@ -3664,7 +3773,7 @@ function openMeetingEmailModal(meetingId) {
 function attendanceSummary(meeting) {
   const records = meeting.attendance || [];
   const count = (status) => records.filter((item) => item.status === status).length;
-  const total = isAdminView() ? state.users.filter((user) => user.active !== 0).length : records.length;
+  const total = state.meetingUsers.filter((user) => user.active !== 0).length;
   return { total, signed: records.length, present: count("present"), late: count("late"), leave: count("leave"), absent: count("absent") };
 }
 
@@ -3703,14 +3812,15 @@ function renderTopicBoard(meeting) {
 
 function renderAttendance(meeting) {
   const map = new Map((meeting.attendance || []).map((item) => [Number(item.user_id), item]));
-  if (!state.users.length) return "<p>暂无成员账号</p>";
+  const attendanceUsers = state.meetingUsers;
+  if (!attendanceUsers.length) return "<p>当前团队暂无成员账号</p>";
   const statuses = [
     ["present", "出席"],
     ["leave", "请假"],
     ["late", "迟到"],
     ["absent", "缺席"],
   ];
-  return `<div class="attendance-grid">${state.users.filter((user) => user.active !== 0).map((user) => {
+  return `<div class="attendance-grid">${attendanceUsers.filter((user) => user.active !== 0).map((user) => {
     const record = map.get(Number(user.id)) || {};
     const status = record.status || "present";
     const needsDonation = status === "late" || status === "absent";
@@ -3731,7 +3841,8 @@ function renderAttendance(meeting) {
 }
 
 function buildAttendanceDashboard(meetings = []) {
-  const activeUsers = state.users.filter((user) => user.active !== 0);
+  const attendanceUsers = state.meetingUsers;
+  const activeUsers = attendanceUsers.filter((user) => user.active !== 0);
   const totalMeetings = meetings.length;
   return activeUsers.map((user) => {
     const stats = {
@@ -4431,6 +4542,8 @@ function renderMeetingDetail(meeting) {
 async function loadMeetings() {
   const data = await api(`/api/meetings?${meetingPeriodQuery()}`);
   state.meetings = data.meetings;
+  state.meetingUsers = data.attendance_users || [];
+  populateSelects();
   const visibleMeetings = upcomingMeetings(state.meetings);
   const selectedStillVisible = visibleMeetings.some((meeting) => Number(meeting.id) === Number(state.selectedMeetingId));
   if (!selectedStillVisible) {
@@ -4818,7 +4931,9 @@ async function loadShifts() {
     api(`/api/dashboards/shifts?${shiftPeriodQuery()}`),
   ]);
   state.shifts = list.shifts;
+  state.shiftUsers = list.users || [];
   $("#shiftStats").innerHTML = renderRank(dashboard.by_user, "hours", "小时");
+  populateSelects();
   renderCalendar();
 }
 
@@ -6496,8 +6611,19 @@ function bindEvents() {
     state.morningDate = event.target.value || iso(new Date());
     await loadMorning().catch((error) => toast(error.message));
   });
-  $("#morningOwnerFilter")?.addEventListener("change", renderMorningBoard);
-  $("#morningStatusFilter")?.addEventListener("change", renderMorningBoard);
+  $("#morningOwnerFilter")?.addEventListener("change", () => {
+    renderMorningBoard();
+    renderMorningNavigator();
+  });
+  $("#morningStatusFilter")?.addEventListener("change", () => {
+    renderMorningBoard();
+    renderMorningNavigator();
+  });
+  $("#morningRefreshBtn")?.addEventListener("click", () => {
+    loadMorning({ preserveScroll: true })
+      .then(() => toast("早例会已刷新"))
+      .catch((error) => toast(error.message));
+  });
   $("#thankPeriodControls")?.addEventListener("change", (event) => {
     if (event.target.matches("#thankYearSelect")) {
       state.thankYear = Number(event.target.value) || state.thankYear;
@@ -7189,6 +7315,20 @@ function bindEvents() {
       });
       return;
     }
+    const morningOwnerTarget = event.target.closest("[data-morning-owner-target]");
+    if (morningOwnerTarget) {
+      const target = document.getElementById(`morning-owner-${morningOwnerTarget.dataset.morningOwnerTarget}`);
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      target?.classList.add("is-navigated");
+      window.setTimeout(() => target?.classList.remove("is-navigated"), 1400);
+      return;
+    }
+    const morningOrder = event.target.closest("[data-morning-order-user]");
+    if (morningOrder) {
+      moveMorningUser(morningOrder.dataset.morningOrderUser, morningOrder.dataset.morningOrderDirection)
+        .catch((error) => toast(error.message));
+      return;
+    }
     const morningHistoryRow = event.target.closest(".morning-list-item[data-morning-history-id]");
     if (morningHistoryRow && !event.target.closest("button, input, textarea, select, label, form")) {
       openMorningHistory(morningHistoryRow.dataset.morningHistoryId).catch((error) => {
@@ -7264,6 +7404,8 @@ function bindEvents() {
         .then((data) => {
           state.morningItems = data.items || state.morningItems;
           state.morningUsers = data.users || state.morningUsers;
+          state.morningVersionToken = data.version_token || state.morningVersionToken;
+          state.morningUpdatePending = false;
           renderMorning();
           toast("早例会事项已删除");
         })
@@ -7448,6 +7590,42 @@ function bindEvents() {
     draggedMemberId = null;
     $$("#memberList .member-card.is-dragging, #memberList .member-card.is-drop-before, #memberList .member-card.is-drop-after").forEach((entry) => {
       entry.classList.remove("is-dragging", "is-drop-before", "is-drop-after");
+    });
+  });
+
+  let draggedMorningUserId = null;
+  document.body.addEventListener("dragstart", (event) => {
+    const item = event.target.closest(".morning-navigator-item[draggable='true']");
+    if (!item || !isAdminView()) return;
+    draggedMorningUserId = item.dataset.morningNavUserId;
+    item.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", `morning:${draggedMorningUserId}`);
+  });
+  document.body.addEventListener("dragover", (event) => {
+    const item = event.target.closest(".morning-navigator-item[draggable='true']");
+    if (!item || !draggedMorningUserId || item.dataset.morningNavUserId === draggedMorningUserId) return;
+    event.preventDefault();
+    $$(".morning-navigator-item.is-drop-target").forEach((entry) => entry.classList.remove("is-drop-target"));
+    item.classList.add("is-drop-target");
+  });
+  document.body.addEventListener("drop", (event) => {
+    const target = event.target.closest(".morning-navigator-item[draggable='true']");
+    if (!target || !draggedMorningUserId || target.dataset.morningNavUserId === draggedMorningUserId) return;
+    event.preventDefault();
+    const ids = state.morningUsers.map((user) => Number(user.id));
+    const from = ids.indexOf(Number(draggedMorningUserId));
+    const to = ids.indexOf(Number(target.dataset.morningNavUserId));
+    if (from >= 0 && to >= 0) {
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      saveMorningOrder(ids).catch((error) => toast(error.message));
+    }
+  });
+  document.body.addEventListener("dragend", () => {
+    draggedMorningUserId = null;
+    $$(".morning-navigator-item.is-dragging, .morning-navigator-item.is-drop-target").forEach((entry) => {
+      entry.classList.remove("is-dragging", "is-drop-target");
     });
   });
 
@@ -7650,6 +7828,8 @@ function bindEvents() {
         });
         state.morningItems = data.items || state.morningItems;
         state.morningUsers = data.users || state.morningUsers;
+        state.morningVersionToken = data.version_token || state.morningVersionToken;
+        state.morningUpdatePending = false;
         renderMorning();
         toast("早例会事项已保存");
         return;
@@ -7772,4 +7952,7 @@ async function startDevelopmentHotReload() {
   }, 1200);
 }
 
-boot().finally(startDevelopmentHotReload);
+boot().finally(() => {
+  startDevelopmentHotReload();
+  startMorningPolling();
+});

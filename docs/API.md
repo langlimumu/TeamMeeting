@@ -76,7 +76,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 `PATCH /api/members/order` 的 `member_ids` 必须恰好覆盖当前组织路由中有效且参与成员展示的全部成员，不能提交其他组织的成员或遗漏当前成员。服务端按组织上下文重新计算集合后再写入顺序，避免管理员在下级团队排序时误改其他团队。
 
-用户同时归属一个组织层级。组织的 `visibility_mode` 支持：`all`（可看全组织）、`subtree`（可看本层及全部下级）、`unit`（仅看本层）。成员、早例会、排班和红黑榜按当前组织上下文过滤；上级会议和公告额外向下级只读透传。管理员可以访问全部组织并在侧栏切换组织路由。
+用户同时归属一个组织层级。组织的 `visibility_mode` 支持：`all`（可切换全组织）、`subtree`（可切换本层及全部下级）、`unit`（只能切换本层）。成员页仍可按授权范围查看组织树；早例会、排班、签到、红黑榜和 Thank You 的人员名单与业务记录只取当前选中组织的直接成员，不自动混入下级、上级或兄弟团队。上级会议和公告额外向下级只读透传。管理员可以访问全部组织，但切换组织后业务名单仍按所选层级重新过滤。
 
 用户类型的 `participation` 与模块权限互相独立，包含 `members`、`morning`、`rules`、`thanks` 四个布尔值。例如拥有红黑榜查看权限，并不代表账号必须进入积分名单。类型更新和早例会编辑使用版本号防止覆盖其他管理员或成员刚提交的修改。
 
@@ -120,12 +120,14 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET/POST | `/api/morning-items` | 按日期查询或新增事项 |
+| GET | `/api/morning-items/version` | 返回当天早例会轻量版本号，供前端轮询是否有他人更新 |
+| PATCH | `/api/morning-items/order` | 管理员提交当前层级完整参会人员 ID，保存早例会显示顺序 |
 | PATCH/DELETE | `/api/morning-items/{id}` | 更新或删除可编辑事项 |
 | GET | `/api/morning-items/{id}/history` | 获取事项跨日进展 |
 | GET | `/api/archive/years` | 获取可归档年份统计 |
 | GET | `/api/archive/search` | 跨会议、对话和早例会搜索 |
 
-历史日期只读。未完成事项由服务端按日继承，客户端不应自行复制。更新或删除时传入查询结果中的 `version` 作为 `expected_version`，收到 409 后应重新加载数据。
+历史日期只读。未完成事项由服务端按日继承，客户端不应自行复制。更新或删除时传入查询结果中的 `version` 作为 `expected_version`，收到 409 后应重新加载数据。前端每 12 秒查询轻量版本号；没有正在编辑时自动刷新，有未保存输入时只显示“有更新”并由用户手动刷新，避免覆盖输入。管理员排序必须恰好提交当前层级中纳入早例会的全部有效账号。
 
 ## 6. 流程中心
 
@@ -149,7 +151,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/meetings` | 查询或创建单场会议；创建受 `meetings.create` 权限控制 |
+| GET/POST | `/api/meetings` | 查询或创建单场会议；查询响应另含当前层级 `attendance_users`，创建受 `meetings.create` 权限控制 |
 | PATCH | `/api/meetings/{id}` | 更新会议信息或阶段 |
 | POST | `/api/meetings/bulk-generate` | 根据预设周期批量生成 |
 | PATCH | `/api/meetings/{id}/topics` | 设置本场会议主题 |
@@ -168,6 +170,8 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 会议阶段值：`draft`、`scheduled`、`in_progress`、`completed`、`archived`。后两种状态锁定议题和纪要。查询会议时会包含祖先组织会议并返回 `inherited=true` 与 `org_unit_name`；所有会议写接口仍要求当前路由直接拥有该会议组织访问权。
 
 创建和更新会议可传 `start_time`，格式为 24 小时制 `HH:MM`。会议纪要邮件是否附带 Thank You 由前端生成时选择，不改变会议数据。
+
+会议签到名单和议题责任人都只接受当前选中组织层级的直属成员；预设议题原责任人不在当前层级时会留空，需重新指定。
 
 议题常用字段：
 
@@ -189,7 +193,7 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | --- | --- | --- |
 | GET/POST | `/api/machines` | 查询或新增机台 |
 | DELETE | `/api/machines/{id}` | 删除机台及其排班 |
-| GET/POST | `/api/shifts` | 查询或批量新增排班 |
+| GET/POST | `/api/shifts` | 查询或批量新增排班；查询响应另含当前层级 `users` |
 | DELETE | `/api/shifts/{id}` | 删除单条排班 |
 | GET | `/api/dashboards/shifts` | 工时统计 |
 | GET/POST | `/api/rules` | 红黑榜细则 |
@@ -200,9 +204,9 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | PATCH/DELETE | `/api/thank-you/{id}` | 修改或删除允许操作的感谢 |
 | GET | `/api/dashboards/thank-you` | 月度/年度 Thank You 排名 |
 
-批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。红黑榜和 Thank You 新增接口会校验目标账号是否处于对应业务参与名单。
+批量排班会先校验整批数据；同一用户同日重复班次或累计工时超过系统配置时整批返回 409，不进行部分写入。排班、签到、红黑榜和 Thank You 的查询与写入都会在服务端校验相关账号属于当前选中组织的直接成员，并继续校验对应业务参与开关。
 
-`GET /api/thank-you` 的候选人可覆盖同一根组织下的协作团队，并返回双方组织、`cross_team` 标识。动态记录在发送方范围、接收方范围和共同上级范围可见；`GET /api/dashboards/thank-you` 仍仅按接收方组织统计排名。
+`GET /api/thank-you` 的候选人只返回当前层级中纳入 Thank You 名单的账号。感谢记录只有发送人和接收人都属于当前层级时才在动态与排名中出现；切换到上级或兄弟团队不会汇总下级感谢。
 
 `GET /api/scores` 支持 `from`、`to` 和 `user_id`。`red_black_show_black_points` 与 `red_black_show_black_details` 为管理员维护的布尔系统配置；普通用户的年度汇总和明细会在服务端按配置裁剪，管理员始终获得完整数据。
 

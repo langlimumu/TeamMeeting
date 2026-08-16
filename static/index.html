@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260810-moments-v2" />
+    <link rel="stylesheet" href="/style.css?v=20260811-moments-bright" />
   </head>
   <body>
     <div class="app-shell">
@@ -799,7 +799,19 @@
                   </select>
                 </div>
               </div>
-              <div id="morningBoard" class="morning-list"></div>
+              <div class="morning-board-layout">
+                <div id="morningBoard" class="morning-list"></div>
+                <aside id="morningNavigator" class="morning-navigator" aria-label="早例会成员导航">
+                  <div class="morning-navigator-head">
+                    <div>
+                      <strong>成员导航</strong>
+                      <small id="morningSyncState">已同步</small>
+                    </div>
+                    <button id="morningRefreshBtn" class="icon-button" type="button" title="刷新早例会" aria-label="刷新早例会">↻</button>
+                  </div>
+                  <div id="morningNavigatorList" class="morning-navigator-list"></div>
+                </aside>
+              </div>
             </section>
           </section>
 
@@ -1065,7 +1077,7 @@
                 <h2 id="selectedShiftDateTitle">选择日期</h2>
                 <form id="shiftForm" class="form-grid admin-only">
                   <select name="machine_id" data-machines required></select>
-                  <select name="user_id" data-users required></select>
+                  <select name="user_id" data-shift-users required></select>
                   <select name="shift_type"><option value="day">白班</option><option value="night">夜班</option></select>
                   <label>开始日期<input name="shift_start_date" type="date" required /></label>
                   <label>结束日期<input name="shift_end_date" type="date" /></label>

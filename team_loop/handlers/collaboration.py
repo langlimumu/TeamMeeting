@@ -563,12 +563,12 @@ class CollaborationHandlerMixin:
             raise AppError(400, "日期格式不正确")
         with connect() as conn:
             carried_count = ensure_morning_carryover(conn, item_date)
-            org_where, org_params = self.organization_user_filter(conn, "owner")
+            org_where, org_params = self.organization_current_user_filter(conn, "owner")
             items = rows_to_list(
                 conn.execute(
                     f"""
                     SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
-                           updater.display_name AS updated_by_name,
+                           owner.morning_sort_order AS owner_sort_order, updater.display_name AS updated_by_name,
                            COALESCE(root.item_date, i.item_date) AS start_date
                     FROM morning_items i
                     JOIN users owner ON owner.id = i.owner_id
@@ -576,7 +576,8 @@ class CollaborationHandlerMixin:
                     LEFT JOIN users updater ON updater.id = i.updated_by
                     LEFT JOIN morning_items root ON root.id = COALESCE(i.root_id, i.id)
                     WHERE i.active=1 AND i.item_date=? AND COALESCE(owner_type.include_in_morning, 1)=1 AND {org_where}
-                    ORDER BY owner.display_name, CASE i.status WHEN 'risk' THEN 0 WHEN 'doing' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END, i.updated_at DESC
+                    ORDER BY CASE WHEN owner.morning_sort_order=0 THEN 2147483647 ELSE owner.morning_sort_order END,
+                             owner.display_name, CASE i.status WHEN 'risk' THEN 0 WHEN 'doing' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END, i.updated_at DESC
                     """,
                     [item_date, *org_params],
                 ).fetchall()
@@ -586,7 +587,7 @@ class CollaborationHandlerMixin:
                 conn.execute(
                     f"""
                     SELECT i.*, owner.display_name AS owner_name, owner.username AS owner_account,
-                           updater.display_name AS updated_by_name,
+                           owner.morning_sort_order AS owner_sort_order, updater.display_name AS updated_by_name,
                            COALESCE(root.item_date, i.item_date) AS start_date
                     FROM morning_items i
                     JOIN users owner ON owner.id = i.owner_id
@@ -613,7 +614,8 @@ class CollaborationHandlerMixin:
                             AND COALESCE(same_day_newer.root_id, same_day_newer.id)=COALESCE(i.root_id, i.id)
                             AND same_day_newer.id>i.id
                       )
-                    ORDER BY owner.display_name, i.updated_at DESC
+                    ORDER BY CASE WHEN owner.morning_sort_order=0 THEN 2147483647 ELSE owner.morning_sort_order END,
+                             owner.display_name, i.updated_at DESC
                     """,
                     [retained_date, *org_params, item_date],
                 ).fetchall()
@@ -627,6 +629,7 @@ class CollaborationHandlerMixin:
             items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
             items.sort(
                 key=lambda item: (
+                    int(item.get("owner_sort_order") or 2147483647),
                     item.get("owner_name") or "",
                     {"risk": 0, "doing": 1, "todo": 2, "done": 3}.get(item.get("status"), 4),
                 )
@@ -640,15 +643,18 @@ class CollaborationHandlerMixin:
             users = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT u.id, u.username, u.display_name, u.user_type, COALESCE(t.name, u.user_type) AS user_type_name
+                    SELECT u.id, u.username, u.display_name, u.user_type, u.morning_sort_order,
+                           COALESCE(t.name, u.user_type) AS user_type_name
                     FROM users u
                     LEFT JOIN user_types t ON t.key = u.user_type
                     WHERE u.active=1 AND COALESCE(t.include_in_morning, 1)=1 AND {org_where.replace('owner.', 'u.')}
-                    ORDER BY t.sort_order, u.id
+                    ORDER BY CASE WHEN u.morning_sort_order=0 THEN 2147483647 ELSE u.morning_sort_order END,
+                             t.sort_order, u.display_name, u.id
                     """,
                     org_params,
                 ).fetchall()
             )
+            version_token = self._morning_version_token(conn, item_date, org_where, org_params)
         return {
             "date": item_date,
             "today": today_iso(),
@@ -658,7 +664,82 @@ class CollaborationHandlerMixin:
             "retained_from_date": retained_date,
             "items": items,
             "users": users,
+            "version_token": version_token,
         }
+
+    def _morning_version_token(self, conn, item_date, org_where, org_params):
+        retained_date = previous_workday(item_date)
+        item_state = conn.execute(
+            f"""
+            SELECT COUNT(*) AS item_count,
+                   COALESCE(MAX(i.updated_at), '') AS latest_update,
+                   COALESCE(SUM(i.version), 0) AS version_sum
+            FROM morning_items i
+            JOIN users owner ON owner.id=i.owner_id
+            LEFT JOIN user_types owner_type ON owner_type.key=owner.user_type
+            WHERE i.active=1 AND i.item_date IN (?, ?)
+              AND COALESCE(owner_type.include_in_morning, 1)=1 AND {org_where}
+            """,
+            [item_date, retained_date, *org_params],
+        ).fetchone()
+        user_rows = conn.execute(
+            f"""
+            SELECT owner.id, owner.morning_sort_order
+            FROM users owner
+            LEFT JOIN user_types owner_type ON owner_type.key=owner.user_type
+            WHERE owner.active=1 AND COALESCE(owner_type.include_in_morning, 1)=1 AND {org_where}
+            ORDER BY CASE WHEN owner.morning_sort_order=0 THEN 2147483647 ELSE owner.morning_sort_order END,
+                     owner.display_name, owner.id
+            """,
+            org_params,
+        ).fetchall()
+        order_state = ",".join(f"{row['id']}:{row['morning_sort_order']}" for row in user_rows)
+        return f"{item_state['item_count']}:{item_state['latest_update']}:{item_state['version_sum']}:{order_state}"
+
+    def morning_items_version(self, query):
+        item_date = (query.get("date") or [today_iso()])[0] or today_iso()
+        try:
+            dt.date.fromisoformat(item_date)
+        except ValueError:
+            raise AppError(400, "日期格式不正确")
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "owner")
+            token = self._morning_version_token(conn, item_date, org_where, org_params)
+        return {"date": item_date, "version_token": token}
+
+    def update_morning_order(self, user):
+        admin = self.require_admin()
+        data = read_json(self)
+        raw_ids = data.get("user_ids") or []
+        if not isinstance(raw_ids, list):
+            raise AppError(400, "早例会排序格式不正确")
+        try:
+            user_ids = [int(user_id) for user_id in raw_ids]
+        except (TypeError, ValueError):
+            raise AppError(400, "早例会排序包含无效成员")
+        if len(user_ids) != len(set(user_ids)):
+            raise AppError(400, "早例会排序不能包含重复成员")
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            eligible_ids = {
+                row["id"] for row in conn.execute(
+                    f"""
+                    SELECT u.id FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    WHERE u.active=1 AND COALESCE(t.include_in_morning, 1)=1 AND {org_where}
+                    """,
+                    org_params,
+                ).fetchall()
+            }
+            if set(user_ids) != eligible_ids:
+                raise AppError(400, "排序名单与当前团队早例会成员不一致，请刷新后重试")
+            for sort_order, user_id in enumerate(user_ids, start=1):
+                conn.execute("UPDATE users SET morning_sort_order=? WHERE id=?", (sort_order, user_id))
+            write_audit(
+                conn, admin, "morning.order", "morning_item", None,
+                "早例会成员顺序已更新", {"user_ids": user_ids}, self.client_address[0],
+            )
+        return {"message": "早例会顺序已更新", **self.list_morning_items({"date": [data.get("date") or today_iso()]})}
 
     def list_morning_item_history(self, item_id):
         with connect() as conn:
@@ -677,7 +758,7 @@ class CollaborationHandlerMixin:
             ).fetchone()
             if not current:
                 raise AppError(404, "早例会事项不存在")
-            self.require_org_unit_access(conn, current["owner_org_unit_id"])
+            self.require_current_org_unit_access(conn, current["owner_org_unit_id"])
             current_item = dict(current)
             chain_id = current_item.get("root_id") or current_item["id"]
             history = rows_to_list(
@@ -736,14 +817,15 @@ class CollaborationHandlerMixin:
             raise AppError(400, "已结束日期不能新增早例会事项")
         due_date = data.get("due_date") or item_date
         with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u", user)
             owner = conn.execute(
-                """
+                f"""
                 SELECT u.id
                 FROM users u
                 LEFT JOIN user_types t ON t.key=u.user_type
-                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_morning, 1)=1
+                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_morning, 1)=1 AND {org_where}
                 """,
-                (owner_id,),
+                [owner_id, *org_params],
             ).fetchone()
             if not owner:
                 raise AppError(400, "该账号未纳入早例会跟踪名单")
@@ -799,19 +881,20 @@ class CollaborationHandlerMixin:
             if not item:
                 raise AppError(404, "早例会事项不存在")
             owner = conn.execute("SELECT org_unit_id FROM users WHERE id=?", (item["owner_id"],)).fetchone()
-            self.require_org_unit_access(conn, owner["org_unit_id"] if owner else None, user)
+            self.require_current_org_unit_access(conn, owner["org_unit_id"] if owner else None, user)
             if is_past_date(item["item_date"]):
                 raise AppError(400, "已结束日期不能修改")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:
                 raise AppError(403, "只能更新自己的早例会事项")
             if "owner_id" in data and user["role"] == "admin":
+                org_where, org_params = self.organization_current_user_filter(conn, "u", user)
                 eligible_owner = conn.execute(
-                    """
+                    f"""
                     SELECT u.id FROM users u
                     LEFT JOIN user_types t ON t.key=u.user_type
-                    WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_morning, 1)=1
+                    WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_morning, 1)=1 AND {org_where}
                     """,
-                    (int(data["owner_id"]),),
+                    [int(data["owner_id"]), *org_params],
                 ).fetchone()
                 if not eligible_owner:
                     raise AppError(400, "该账号未纳入早例会跟踪名单")
@@ -835,7 +918,7 @@ class CollaborationHandlerMixin:
             if not item:
                 raise AppError(404, "早例会事项不存在")
             owner = conn.execute("SELECT org_unit_id FROM users WHERE id=?", (item["owner_id"],)).fetchone()
-            self.require_org_unit_access(conn, owner["org_unit_id"] if owner else None, user)
+            self.require_current_org_unit_access(conn, owner["org_unit_id"] if owner else None, user)
             if is_past_date(item["item_date"]):
                 raise AppError(400, "已结束日期不能删除")
             if user["role"] != "admin" and item["owner_id"] != user["id"]:

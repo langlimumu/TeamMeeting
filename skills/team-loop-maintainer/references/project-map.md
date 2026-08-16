@@ -30,7 +30,7 @@
 - User-type permissions include view/create/edit/delete; UI hiding never replaces server checks.
 - User-type participation scopes independently control current team-member, morning, red/black, and Thank You candidate lists without deleting history.
 - Organization visibility controls which users and organization-owned records are in scope; it is independent from module permissions and participation scopes. Client organization paths must always be intersected with the authenticated user's accessible organization IDs.
-- Organization propagation uses three distinct sets: direct `visible_ids` for normal reads/writes, ancestor IDs for read-only meetings and announcement topics, and same-root collaboration IDs for cross-team Thank You candidates. Thank You activity follows sender/receiver visibility; ranking follows receiver ownership only.
+- Organization propagation separates the selected organization, broader visible routes, and ancestors. Morning, shifts, attendance, red/black, and Thank You use direct members of the selected organization; only meetings and announcement topics inherit from ancestors.
 - User types are dynamic. Only `guest` is reserved; it is read-only and cannot be assigned to an account.
 - Past morning-meeting dates are read-only; unfinished items inherit through a root chain.
 - Completed or archived meetings lock agenda and minutes until an admin reopens them.

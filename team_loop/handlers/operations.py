@@ -31,7 +31,7 @@ class OperationsHandlerMixin:
         where, params = date_filter(query, "s.score_date")
         user = self.current_user(required=False)
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "u", user)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", user)
             show_black_details = bool(user and user.get("role") == "admin") or get_setting_value(
                 conn, "red_black_show_black_details", "1"
             ) == "1"
@@ -67,7 +67,7 @@ class OperationsHandlerMixin:
         if data.get("kind") == "black":
             points = -points
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "u", admin)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
             eligible = conn.execute(
                 f"""
                 SELECT u.id
@@ -90,7 +90,16 @@ class OperationsHandlerMixin:
         admin = self.require_admin()
         data = read_json(self)
         with connect() as conn:
-            score = conn.execute("SELECT * FROM red_black_scores WHERE id=?", (score_id,)).fetchone()
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            score = conn.execute(
+                f"""
+                SELECT s.*
+                FROM red_black_scores s
+                JOIN users u ON u.id=s.user_id
+                WHERE s.id=? AND {org_where}
+                """,
+                [score_id, *org_params],
+            ).fetchone()
             if not score:
                 raise AppError(404, "积分记录不存在")
             if score["score_date"] != today_iso():
@@ -104,12 +113,12 @@ class OperationsHandlerMixin:
                 raise AppError(400, "积分日期只能保持当天")
             user_id = int(data.get("user_id") or score["user_id"])
             if not conn.execute(
-                """
+                f"""
                 SELECT u.id FROM users u
                 LEFT JOIN user_types t ON t.key=u.user_type
-                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_rules, 1)=1
+                WHERE u.id=? AND u.active=1 AND COALESCE(t.include_in_rules, 1)=1 AND {org_where}
                 """,
-                (user_id,),
+                [user_id, *org_params],
             ).fetchone():
                 raise AppError(400, "该账号未纳入红黑榜名单")
             rule_id = data.get("rule_id") or None
@@ -137,7 +146,7 @@ class OperationsHandlerMixin:
         where, params = date_filter(query, "s.score_date")
         user = self.current_user(required=False)
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "u", user)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", user)
             show_black_points = bool(user and user.get("role") == "admin") or get_setting_value(
                 conn, "red_black_show_black_points", "1"
             ) == "1"
@@ -246,6 +255,7 @@ class OperationsHandlerMixin:
         with connect() as conn:
             context = self.organization_context(conn)
             org_where, org_params = self.organization_entity_filter(conn, "m.org_unit_id", inherit_ancestors=True)
+            attendance_where, attendance_params = self.organization_current_user_filter(conn, "u")
             meetings = rows_to_list(
                 conn.execute(
                     f"""
@@ -278,12 +288,14 @@ class OperationsHandlerMixin:
             )
             attendance = rows_to_list(
                 conn.execute(
-                    """
+                    f"""
                     SELECT a.*, u.display_name
                     FROM meeting_attendance a
                     JOIN users u ON u.id = a.user_id
+                    WHERE {attendance_where}
                     ORDER BY u.display_name
-                    """
+                    """,
+                    attendance_params,
                 ).fetchall()
             )
             topic_links = rows_to_list(
@@ -615,14 +627,35 @@ class OperationsHandlerMixin:
             write_audit(conn, admin, "meeting_topic_type.delete", "meeting_topic_type", type_id, "议题类型已删除", {"name": topic_type["name"]}, self.client_address[0])
         return {"message": "议题类型已删除", **self.list_meeting_topics()}
 
+    def current_meeting_owner_id(self, conn, raw_owner_id, user, strict=True):
+        if raw_owner_id in (None, "", 0, "0"):
+            return None
+        try:
+            owner_id = int(raw_owner_id)
+        except (TypeError, ValueError):
+            if strict:
+                raise AppError(400, "责任人数据不正确")
+            return None
+        org_where, org_params = self.organization_current_user_filter(conn, "u", user)
+        owner = conn.execute(
+            f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {org_where}",
+            [owner_id, *org_params],
+        ).fetchone()
+        if owner:
+            return owner_id
+        if strict:
+            raise AppError(400, "责任人不属于当前团队")
+        return None
+
     def create_meeting_topic_option(self):
-        self.require_admin()
+        admin = self.require_admin()
         data = read_json(self)
         recurrence_type, recurrence_value, recurrence_weeks = normalize_recurrence(data)
         with connect() as conn:
+            owner_id = self.current_meeting_owner_id(conn, data.get("owner_id"), admin)
             cursor = conn.execute(
                 "INSERT INTO meeting_topic_options(type_id, title, default_detail, owner_id, recurrence_weeks, recurrence_type, recurrence_value, sort_order, active, duration_minutes, expected_output, materials) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)",
-                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", data.get("owner_id") or None, recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0), max(1, min(180, int(data.get("duration_minutes") or 10))), data.get("expected_output") or "", data.get("materials") or ""),
+                (data.get("type_id"), data.get("title"), data.get("default_detail") or "", owner_id, recurrence_weeks, recurrence_type, recurrence_value, int(data.get("sort_order") or 0), max(1, min(180, int(data.get("duration_minutes") or 10))), data.get("expected_output") or "", data.get("materials") or ""),
             )
             write_audit(conn, self.current_user(), "meeting_topic_option.create", "meeting_topic_option", cursor.lastrowid, "预设议题已创建", {"title": data.get("title"), "recurrence_type": recurrence_type, "recurrence_value": recurrence_value}, self.client_address[0])
         return {"message": "议题选项已创建", **self.list_meeting_topics()}
@@ -647,6 +680,9 @@ class OperationsHandlerMixin:
             raise AppError(400, "没有可更新字段")
         values.append(option_id)
         with connect() as conn:
+            if "owner_id" in data:
+                owner_index = fields.index("owner_id=?")
+                values[owner_index] = self.current_meeting_owner_id(conn, data.get("owner_id"), admin)
             conn.execute(f"UPDATE meeting_topic_options SET {', '.join(fields)} WHERE id=?", values)
             write_audit(conn, admin, "meeting_topic_option.update", "meeting_topic_option", option_id, "预设议题已更新", {"fields": list(data.keys())}, self.client_address[0])
         return {"message": "预设议题已更新", **self.list_meeting_topics()}
@@ -660,6 +696,7 @@ class OperationsHandlerMixin:
 
     def create_meeting_item(self, meeting_id, user):
         data = read_json(self)
+        owner_is_explicit = bool(data.get("owner_id"))
         type_id = data.get("type_id") or None
         option_id = data.get("option_id") or None
         section = data.get("section") or "议题"
@@ -698,6 +735,9 @@ class OperationsHandlerMixin:
                     section = topic_type["name"]
             if not title:
                 raise AppError(400, "议题标题不能为空")
+            owner_id = self.current_meeting_owner_id(
+                conn, data.get("owner_id"), user, strict=owner_is_explicit
+            )
             meeting = conn.execute("SELECT status FROM meetings WHERE id=?", (meeting_id,)).fetchone()
             if not meeting:
                 raise AppError(404, "会议不存在")
@@ -706,7 +746,7 @@ class OperationsHandlerMixin:
             next_order = conn.execute("SELECT COALESCE(MAX(sort_order), 0) + 10 FROM meeting_items WHERE meeting_id=?", (meeting_id,)).fetchone()[0]
             cursor = conn.execute(
                 "INSERT INTO meeting_items(meeting_id, section, title, detail, minutes, owner_id, status, due_date, created_by, created_at, type_id, option_id, sort_order, duration_minutes, expected_output, materials) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (meeting_id, section, title, detail, data.get("minutes") or "", data.get("owner_id") or None, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id, next_order, max(1, min(180, int(data.get("duration_minutes") or 10))), data.get("expected_output") or "", data.get("materials") or ""),
+                (meeting_id, section, title, detail, data.get("minutes") or "", owner_id, data.get("status") or "todo", data.get("due_date") or None, user["id"], now_iso(), type_id, option_id, next_order, max(1, min(180, int(data.get("duration_minutes") or 10))), data.get("expected_output") or "", data.get("materials") or ""),
             )
             link_meeting_topic(conn, meeting_id, type_id, user["id"])
             write_audit(conn, user, "meeting_item.create", "meeting_item", cursor.lastrowid, "会议议题已添加", {"meeting_id": meeting_id, "title": title}, self.client_address[0])
@@ -758,9 +798,12 @@ class OperationsHandlerMixin:
                     (meeting_id,),
                 ).fetchall()
             }
+            owner_where, owner_params = self.organization_current_user_filter(conn, "u", actor)
             valid_owners = {
                 row["id"]
-                for row in conn.execute("SELECT id FROM users WHERE active=1").fetchall()
+                for row in conn.execute(
+                    f"SELECT u.id FROM users u WHERE u.active=1 AND {owner_where}", owner_params
+                ).fetchall()
             }
             next_order = conn.execute(
                 "SELECT COALESCE(MAX(sort_order), 0) + 10 FROM meeting_items WHERE meeting_id=?",
@@ -784,9 +827,10 @@ class OperationsHandlerMixin:
                 if not option:
                     skipped += 1
                     continue
-                owner_id = requested_item["owner_id"] or option["owner_id"]
-                if owner_id is not None and owner_id not in valid_owners:
+                requested_owner_id = requested_item["owner_id"]
+                if requested_owner_id is not None and requested_owner_id not in valid_owners:
                     raise AppError(400, f"议题“{option['title']}”的责任人不可用")
+                owner_id = requested_owner_id or (option["owner_id"] if option["owner_id"] in valid_owners else None)
                 conn.execute(
                     """
                     INSERT INTO meeting_items(
@@ -834,6 +878,9 @@ class OperationsHandlerMixin:
         values.append(item_id)
         with connect() as conn:
             self.require_meeting_item_access(conn, item_id, user)
+            if "owner_id" in data:
+                owner_index = fields.index("owner_id=?")
+                values[owner_index] = self.current_meeting_owner_id(conn, data.get("owner_id"), user)
             item = conn.execute("SELECT i.id, m.status AS meeting_status FROM meeting_items i JOIN meetings m ON m.id=i.meeting_id WHERE i.id=? AND i.deleted_at IS NULL", (item_id,)).fetchone()
             if not item:
                 raise AppError(404, "议题不存在")
@@ -958,6 +1005,13 @@ class OperationsHandlerMixin:
         donation_done = 1 if donation_required and data.get("donation_done") else 0
         with connect() as conn:
             self.require_meeting_access(conn, meeting_id, admin)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            attendee = conn.execute(
+                f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {org_where}",
+                [data.get("user_id"), *org_params],
+            ).fetchone()
+            if not attendee:
+                raise AppError(400, "签到成员不属于当前团队")
             conn.execute(
                 """
                 INSERT INTO meeting_attendance(meeting_id, user_id, status, donation_required, donation_amount, donation_done, note, updated_by, updated_at)
@@ -1181,7 +1235,7 @@ class OperationsHandlerMixin:
     def list_shifts(self, query):
         where, params = date_filter(query, "s.shift_date")
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "u")
+            org_where, org_params = self.organization_current_user_filter(conn, "u")
             return rows_to_list(
                 conn.execute(
                     f"""
@@ -1213,7 +1267,7 @@ class OperationsHandlerMixin:
         if shift_type not in ("day", "night"):
             raise AppError(400, "班次类型不正确")
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "u", admin)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
             default_hours = get_float_setting(conn, "shift_default_hours", 12, minimum=0.5, maximum=24)
             max_daily_hours = get_float_setting(conn, "shift_max_daily_hours", 24, minimum=1, maximum=48)
             hours = float(data.get("hours") or default_hours)
@@ -1262,7 +1316,11 @@ class OperationsHandlerMixin:
     def delete_shift(self, shift_id):
         admin = self.require_admin()
         with connect() as conn:
-            shift = conn.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            shift = conn.execute(
+                f"SELECT s.* FROM shifts s JOIN users u ON u.id=s.user_id WHERE s.id=? AND {org_where}",
+                [shift_id, *org_params],
+            ).fetchone()
             if not shift:
                 raise AppError(404, "排班不存在")
             conn.execute("DELETE FROM shifts WHERE id=?", (shift_id,))
@@ -1272,7 +1330,7 @@ class OperationsHandlerMixin:
     def shift_dashboard(self, query):
         where, params = date_filter(query, "s.shift_date")
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "u")
+            org_where, org_params = self.organization_current_user_filter(conn, "u")
             by_user = rows_to_list(
                 conn.execute(
                     f"""
@@ -1305,15 +1363,10 @@ class OperationsHandlerMixin:
     def list_thank_you(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
-            context = self.organization_context(conn, viewer if viewer is not None else getattr(self, "api_user", None))
-            visible_ids = context["visible_ids"]
-            if visible_ids:
-                placeholders = ",".join("?" for _ in visible_ids)
-                relation_where = f"(giver.org_unit_id IN ({placeholders}) OR receiver.org_unit_id IN ({placeholders}))"
-                relation_params = [*visible_ids, *visible_ids]
-            else:
-                relation_where = "1=0"
-                relation_params = []
+            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", viewer)
+            receiver_where, receiver_params = self.organization_current_user_filter(conn, "receiver", viewer)
+            relation_where = f"({giver_where} AND {receiver_where})"
+            relation_params = [*giver_params, *receiver_params]
             votes = rows_to_list(
                 conn.execute(
                     f"""
@@ -1359,7 +1412,13 @@ class OperationsHandlerMixin:
         if len(evidence) < 5:
             raise AppError(400, "请写下具体事实依据")
         with connect() as conn:
-            org_where, org_params = self.organization_collaboration_user_filter(conn, "u", user)
+            org_where, org_params = self.organization_current_user_filter(conn, "u", user)
+            giver = conn.execute(
+                f"SELECT u.id FROM users u WHERE u.id=? AND u.active=1 AND {org_where}",
+                [user["id"], *org_params],
+            ).fetchone()
+            if not giver:
+                raise AppError(403, "只能在本人所属的当前团队送出感谢")
             weekly_limit = get_int_setting(conn, "thank_you_weekly_limit", 3, minimum=1, maximum=20)
             count = conn.execute("SELECT COUNT(*) FROM thank_you_votes WHERE voter_id=? AND week_start=?", (user["id"], start)).fetchone()[0]
             remaining = weekly_limit - count
@@ -1379,7 +1438,7 @@ class OperationsHandlerMixin:
             )
             active_receiver_ids = {row["id"] for row in active_receivers}
             if len(active_receiver_ids) != len(receiver_ids):
-                raise AppError(400, "感谢对象不存在、已停用或不在当前协作组织")
+                raise AppError(400, "感谢对象不存在、已停用或不在当前团队")
             existing = rows_to_list(
                 conn.execute(
                     f"""
@@ -1414,7 +1473,17 @@ class OperationsHandlerMixin:
         if len(evidence) < 5:
             raise AppError(400, "请写下具体事实依据")
         with connect() as conn:
-            vote = conn.execute("SELECT * FROM thank_you_votes WHERE id=?", (vote_id,)).fetchone()
+            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", user)
+            receiver_where, receiver_params = self.organization_current_user_filter(conn, "receiver", user)
+            vote = conn.execute(
+                f"""
+                SELECT v.* FROM thank_you_votes v
+                JOIN users giver ON giver.id=v.voter_id
+                JOIN users receiver ON receiver.id=v.receiver_id
+                WHERE v.id=? AND {giver_where} AND {receiver_where}
+                """,
+                [vote_id, *giver_params, *receiver_params],
+            ).fetchone()
             if not vote:
                 raise AppError(404, "感谢记录不存在")
             if not self.can_manage_thank_vote(vote, user):
@@ -1425,15 +1494,17 @@ class OperationsHandlerMixin:
 
     def delete_thank_you(self, vote_id, user):
         with connect() as conn:
+            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", user)
+            receiver_where, receiver_params = self.organization_current_user_filter(conn, "receiver", user)
             vote = conn.execute(
-                """
+                f"""
                 SELECT v.*, giver.display_name AS voter_name, receiver.display_name AS receiver_name
                 FROM thank_you_votes v
                 JOIN users giver ON giver.id = v.voter_id
                 JOIN users receiver ON receiver.id = v.receiver_id
-                WHERE v.id=?
+                WHERE v.id=? AND {giver_where} AND {receiver_where}
                 """,
-                (vote_id,),
+                [vote_id, *giver_params, *receiver_params],
             ).fetchone()
             if not vote:
                 raise AppError(404, "感谢记录不存在")
@@ -1461,19 +1532,22 @@ class OperationsHandlerMixin:
     def thank_you_dashboard(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
         with connect() as conn:
-            org_where, org_params = self.organization_user_filter(conn, "receiver", viewer)
+            org_where, org_params = self.organization_current_user_filter(conn, "receiver", viewer)
+            giver_where, giver_params = self.organization_current_user_filter(conn, "giver", viewer)
             stars = rows_to_list(
                 conn.execute(
                     f"""
                     SELECT receiver.id, receiver.display_name, COUNT(*) AS thanks
                     FROM thank_you_votes v
                     JOIN users receiver ON receiver.id = v.receiver_id
+                    JOIN users giver ON giver.id = v.voter_id
                     LEFT JOIN user_types t ON t.key=receiver.user_type
-                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1 AND {org_where}
+                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1
+                      AND {org_where} AND {giver_where}
                     GROUP BY receiver.id
                     ORDER BY thanks DESC, receiver.display_name
                     """,
-                    [*params, *org_params],
+                    [*params, *org_params, *giver_params],
                 ).fetchall()
             )
             weekly = rows_to_list(
@@ -1482,12 +1556,14 @@ class OperationsHandlerMixin:
                     SELECT v.week_start, COUNT(*) AS thanks
                     FROM thank_you_votes v
                     JOIN users receiver ON receiver.id=v.receiver_id
+                    JOIN users giver ON giver.id=v.voter_id
                     LEFT JOIN user_types t ON t.key=receiver.user_type
-                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1 AND {org_where}
+                    WHERE {where} AND receiver.active=1 AND COALESCE(t.include_in_thanks, 1)=1
+                      AND {org_where} AND {giver_where}
                     GROUP BY v.week_start
                     ORDER BY v.week_start
                     """,
-                    [*params, *org_params],
+                    [*params, *org_params, *giver_params],
                 ).fetchall()
             )
         return {"stars": stars, "weekly": weekly}

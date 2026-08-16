@@ -992,7 +992,7 @@ class AccountsHandlerMixin:
             if collaboration:
                 org_where, org_params = self.organization_collaboration_user_filter(conn, "u", viewer)
             else:
-                org_where, org_params = self.organization_user_filter(conn, "u", viewer)
+                org_where, org_params = self.organization_current_user_filter(conn, "u", viewer)
             return rows_to_list(
                 conn.execute(
                     f"""
@@ -1004,6 +1004,25 @@ class AccountsHandlerMixin:
                     LEFT JOIN org_units o ON o.id=u.org_unit_id
                     WHERE u.active=1 AND COALESCE(t.{column}, 1)=1 AND {org_where}
                     ORDER BY o.sort_order, o.name, t.sort_order, u.display_name
+                    """,
+                    org_params,
+                ).fetchall()
+            )
+
+    def list_current_organization_users(self, viewer=None):
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u", viewer)
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT u.id, u.username, u.display_name, u.user_type,
+                           COALESCE(t.name, u.user_type) AS user_type_name,
+                           u.org_unit_id, o.name AS org_unit_name
+                    FROM users u
+                    LEFT JOIN user_types t ON t.key=u.user_type
+                    LEFT JOIN org_units o ON o.id=u.org_unit_id
+                    WHERE u.active=1 AND {org_where}
+                    ORDER BY t.sort_order, u.display_name, u.id
                     """,
                     org_params,
                 ).fetchall()

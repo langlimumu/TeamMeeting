@@ -84,7 +84,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Gra
 - 只有会议和“团队公告”会从上级向下级透传，普通讨论、早例会、排班和积分不会透传；
 - 确认当前侧栏团队路径正确，上级记录确实创建在祖先组织；
 - 透传记录应显示“上级安排/上级团队”，并且下级只能查看；
-- 跨团队 Thank You 只在发送方、接收方和共同上级显示，无关兄弟团队看不到；排名只归接收方；
+- 早例会、排班、签到、积分和 Thank You 只显示侧栏当前选中团队的直接成员；如果出现上下级人员混入，检查接口是否误用了子树过滤而不是 `organization_current_user_filter()`；
 - 修改组织范围后运行 `python scripts\organization_scope_smoke_test.py`，检查是否有自定义查询绕过统一组织过滤。
 
 ## Outlook 邮件没有套用模板

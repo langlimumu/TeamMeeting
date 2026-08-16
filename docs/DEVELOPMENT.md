@@ -141,17 +141,20 @@ if path == "/api/example":
 
 企业 SSO 使用 OAuth2/OIDC Authorization Code + PKCE，可走 Issuer Discovery 或手动三端点。手动配置页按 OAuth2 认证地址、Access Token 地址、UserInfo 地址和应用凭据分组，但存储键继续使用 `sso_authorization_url/sso_token_url/sso_userinfo_url`，避免仅因文案调整破坏环境变量和既有数据库。授权、Token 和 UserInfo 地址必须为 HTTPS，本机集成测试仅允许 `localhost/127.0.0.1` 使用 HTTP。`team_loop/sso_http.py` 按身份平台 Origin 维护有界 HTTP/1.1 Keep-Alive 连接池，Discovery 使用短缓存和单飞锁避免登录高峰重复握手；跨域重定向与 Token POST 重定向必须拒绝，不能把 Bearer Token 或 Client Secret 转发到未配置域名。state 只能使用一次，Client Secret 不得出现在公开设置、日志、Git 或前端源码中；密码型设置留空表示保留旧值。前端发起 SSO 时把当前 `/org/...` 路径和 `view` 模块放入 `return_to`，后端必须经过 `sanitize_sso_return_to()` 后绑定到 `sso_login_states`，回调不得直接信任浏览器或身份平台传回的跳转地址。登录成功和失败都通过已保存目标返回；用户无权访问原组织或模块时由现有组织与模块权限逻辑自动降级。`users.employee_id` 是 SSO 工号关联主键，首次登录先按工号关联已有用户；不存在时自动创建 `user_type=guest, classification_pending=1` 的只读账号，由管理员后续分类。`external_subject` 保存身份平台稳定主体。SSO 群组不得直接覆盖 `org_unit_id`，只更新 `suggested_org_unit_id/sso_groups_json/sso_last_login_at`；管理员确认团队后再清空建议。修改认证链路后运行 `python scripts\sso_smoke_test.py` 和 `python scripts\sso_pool_smoke_test.py`，验证业务映射、安全边界、连接复用和 Discovery 缓存。
 
-组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。成员、论坛、早例会、会议、排班、红黑榜与 Thank You 的读取和写入都必须复用组织过滤。管理员虽可切换全部组织，业务页面仍应按所选路由过滤。
+组织层级由 `org_units` 构成树，业务接口通过 `organization_context()` 计算当前账号允许访问、当前路由实际可见、祖先透传和同根协作组织 ID。前端传入的 `X-Team-Org-Path` 只是选择意图，不能作为授权依据。人员型业务要区分“账号允许切换的组织”和“当前层级直接成员”：早例会、排班、签到、红黑榜与 Thank You 统一使用 `organization_current_user_filter()`；成员页等确需子树视图的功能才使用 `organization_user_filter()`。管理员虽可切换全部组织，业务页面仍应按所选层级过滤。
 
 成员拖动排序提交的必须是当前组织路由完整可见成员集合。`update_member_order()` 应复用 `organization_user_filter()` 校验，而不是拿全库有效成员作比较；响应也必须带当前组织上下文重新查询，保证拖动后前端不会突然混入其他团队。桌面拖动之外保留上移/下移操作，作为触屏与键盘回退。
 
 组织数据必须先声明归属和传播方式，不能用一个“可见组织集合”同时决定读写：
 
-- `visible_ids`：当前路由直接业务范围，人员型数据和写操作使用；
+- `selected.id`：当前选中组织；早例会、排班、签到、红黑榜和 Thank You 通过 `organization_current_user_filter()` 只匹配该组织的直接成员；
+- `visible_ids`：当前账号在所选路由下可查看的组织集合，只用于明确需要子树聚合的页面；
 - `ancestor_ids/inherited_ids`：只用于明确允许向下透传的上级记录；当前仅会议和 `announcement` 团队公告；
-- `collaboration_ids`：同一根组织内可选的跨团队协作对象；当前用于 Thank You 收件人候选；
+- `collaboration_ids`：保留给明确声明的跨团队协作功能，不得默认用于人员名单；
 - 上级会议和公告在下级只读，原记录的编辑、删除、置顶、签到和议题修改仍必须通过直接组织访问校验；公告回复和表情可在下级参与；
-- Thank You 动态按“发送方或接收方属于当前范围”过滤，排名仅按接收方归属过滤。无关兄弟团队不能看到跨团队动态。
+- Thank You 候选人、动态和排名都要求发送人与接收人属于当前选中组织，跨团队记录不在任一层级自动汇总。
+
+早例会多人协作采用轻量版本轮询，不轮询完整事项列表。`GET /api/morning-items/version` 由当天及上个工作日相关事项版本和当前人员顺序生成令牌；前端仅在令牌变化且没有活跃输入时刷新完整数据。编辑中只标记待刷新，防止定时更新覆盖未提交内容。管理员排序通过 `PATCH /api/morning-items/order` 提交当前层级完整早例会人员集合，服务端必须验证无遗漏、无越层账号。
 
 SSO 使用配置项 `sso_group_claim` 读取群组，`match_sso_org_unit()` 只返回明确匹配且最深的组织。匹配结果只能作为管理员建议，不允许在登录回调里迁移已有账号或历史记录；自动创建的新账号回落到根组织。登录完成后优先返回发起认证时保存的站内组织路径和模块；若账号无权访问，`organization_context()` 与 `switchPage()` 分别回落到账号正式组织和第一个可用模块。历史 `team_posts/meetings` 迁移必须使用 `scripts/migrate_org_data.py` 先预览、自动备份并输出回滚清单。修改组织范围或 SSO 群组映射后运行 `python scripts\organization_scope_smoke_test.py`、`python scripts\sso_smoke_test.py` 和 `python scripts\org_data_migration_test.py`。
 
@@ -271,3 +274,31 @@ TEAM_LOOP_SQLITE_BUSY_TIMEOUT_MS=15000
 开发完成后先执行灰度发布，在 8001 端口使用正式库快照验证。确认后再执行 `Promote`。不要把灰度数据库复制回正式数据库，也不要直接替换正在使用的 SQLite 文件。
 
 完整流程见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+## 11. 100 人规模 Mock 数据
+
+需要检查大列表、跨组织数据、滚动区域和 100 人并发场景时，先完成灰度部署，再执行：
+
+```powershell
+python scripts\seed_scale_mock.py --dry-run
+python scripts\seed_scale_mock.py
+```
+
+脚本默认只写入 `data/deploy/gray/weekly_team_gray.db`，并拒绝不在 `gray` 目录且文件名不是 `*_gray.db` 的数据库。写入前会使用 SQLite Backup API 在灰度目录的 `mock_backups/` 下生成一致性备份。
+
+默认行为如下：
+
+- 保留现有真实账号和业务数据，补足到 100 个活跃账号；
+- Mock 账号使用 `mock001` 起的固定命名，并服从现有用户类型、组织和业务参与开关；
+- 生成跨日期、跨团队的成员、早例会、会议签到、排班、红黑榜、Thank You、论坛、链接、流程和团队时刻数据；
+- Mock 业务标题或依据使用 `[MOCK]` 标识，机台使用 `MOCK-` 前缀；
+- 使用固定随机种子，可重复执行；再次执行会清理上一批 Mock 业务数据后重建，不会持续累加；
+- 写入后自动执行活跃人数、Thank You 每周上限、自我感谢、外键和 `PRAGMA quick_check` 校验。
+
+可调整目标人数和随机种子：
+
+```powershell
+python scripts\seed_scale_mock.py --target-users 100 --seed 20260811
+```
+
+Mock 账号仅用于灰度体验，禁止把灰度数据库、`mock_backups/` 或统一测试密码提交到 Git，也禁止将生成后的灰度库提升或复制为正式数据库。重新执行 `deploy.ps1 -Action Gray` 会从正式库重新制作灰度快照，因此会清除此前生成的 Mock 数据；需要体验时应在灰度部署完成后最后执行本脚本。
