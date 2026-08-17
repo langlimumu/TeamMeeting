@@ -1661,7 +1661,7 @@ function renderMorningNavigator() {
   const counts = new Map();
   state.morningItems.forEach((item) => counts.set(Number(item.owner_id), (counts.get(Number(item.owner_id)) || 0) + 1));
   list.innerHTML = users.map((user, index) => `
-    <div class="morning-navigator-item ${ownerFilter && String(user.id) !== String(ownerFilter) ? "is-filtered" : ""}"
+    <div class="morning-navigator-item ${ownerFilter && String(user.id) !== String(ownerFilter) ? "is-filtered" : ""} ${ownerFilter && String(user.id) === String(ownerFilter) ? "is-current" : ""}"
          draggable="${isAdminView()}" data-morning-nav-user-id="${user.id}">
       ${isAdminView() ? `<span class="morning-nav-drag" title="拖动调整顺序" aria-hidden="true">⋮⋮</span>` : ""}
       <button class="morning-nav-jump" type="button" data-morning-owner-target="${user.id}">

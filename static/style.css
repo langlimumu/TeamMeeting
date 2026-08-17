@@ -11511,3 +11511,99 @@ body[data-theme] .org-tree-node.active .org-tree-select {
     min-height: 42px;
   }
 }
+
+/* Keep the floating morning navigator quiet across themes. Theme-level button
+   rules are intentionally broad, so these component rules must come last. */
+body[data-theme] .morning-navigator {
+  border-color: #d8dee9;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 12px 28px rgba(31, 41, 55, 0.12);
+}
+
+body[data-theme] .morning-navigator-head {
+  border-bottom-color: #dfe5ee;
+  border-left: 3px solid #5b76fe;
+  background: #f4f7fb;
+}
+
+body[data-theme] .morning-navigator-head strong {
+  color: #1f2937;
+}
+
+body[data-theme] #morningRefreshBtn {
+  border: 1px solid #d3dae6;
+  background: #fff;
+  color: #536075;
+  box-shadow: none;
+  transform: none;
+}
+
+body[data-theme] #morningRefreshBtn:hover {
+  border-color: #9eb4ee;
+  background: #edf3ff;
+  color: #315ec9;
+  box-shadow: none;
+  transform: none;
+}
+
+body[data-theme] .morning-navigator-item {
+  border: 1px solid transparent;
+  background: #f8fafc;
+}
+
+body[data-theme] .morning-navigator-item:hover {
+  border-color: #d6e2f5;
+  background: #f0f5fc;
+}
+
+body[data-theme] .morning-navigator-item.is-current {
+  border-color: #a9bff5;
+  background: #eaf1ff;
+  box-shadow: inset 3px 0 0 #5b76fe;
+}
+
+body[data-theme] .morning-navigator .morning-nav-jump {
+  border: 0;
+  background: transparent;
+  color: #243044;
+  box-shadow: none;
+  transform: none;
+}
+
+body[data-theme] .morning-navigator .morning-nav-jump:hover {
+  border: 0;
+  background: transparent;
+  color: #315ec9;
+  box-shadow: none;
+  transform: none;
+}
+
+body[data-theme] .morning-navigator .morning-nav-jump small {
+  min-width: 22px;
+  border-radius: 999px;
+  background: #e8edf5;
+  color: #526071;
+  padding: 2px 6px;
+  text-align: center;
+}
+
+body[data-theme] .morning-navigator-item.is-current .morning-nav-jump small {
+  background: #5b76fe;
+  color: #fff;
+}
+
+body[data-theme] .morning-navigator .morning-nav-order-actions button {
+  border-color: #d6dce6;
+  background: #fff;
+  color: #687588;
+  box-shadow: none;
+  transform: none;
+}
+
+body[data-theme] .morning-navigator .morning-nav-order-actions button:hover {
+  border-color: #a9bff5;
+  background: #edf3ff;
+  color: #315ec9;
+  box-shadow: none;
+  transform: none;
+}
