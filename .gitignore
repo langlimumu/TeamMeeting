@@ -5,3 +5,4 @@ data/
 .env
 .venv/
 venv/
+.workbuddy/
