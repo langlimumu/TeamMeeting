@@ -158,6 +158,17 @@ let activePageRefreshId = 0;
 let authSyncInFlight = false;
 let lastAuthSyncAt = 0;
 
+const linkColumnWidthsStorageKey = "teamLoopLinkColumnWidths";
+const linkColumnMinWidth = 56;
+const linkColumnDefinitions = [
+  { key: "name", label: "名称" },
+  { key: "scope", label: "适用范围" },
+  { key: "url", label: "地址" },
+  { key: "clicks", label: "点击" },
+  { key: "manage", label: "操作" },
+];
+let activeLinkColumnDrag = null;
+
 function safeStorageGet(key, fallback) {
   try {
     return localStorage.getItem(key) || fallback;
@@ -4762,6 +4773,154 @@ function linkTagTone(value, index = 0) {
   return `tone-${(hash % 6) + 1}`;
 }
 
+function linkColumnKeys(canManage) {
+  return linkColumnDefinitions
+    .filter((column) => column.key !== "manage" || canManage)
+    .map((column) => column.key);
+}
+
+function renderLinkColumnHeader(key) {
+  const definition = linkColumnDefinitions.find((column) => column.key === key) || { label: "" };
+  return `<th data-col-key="${key}">${definition.label}<span class="link-col-resizer" data-col-resize="${key}" role="separator" aria-orientation="vertical" tabindex="0" aria-label="调整${definition.label}列宽" title="拖动调整列宽，双击恢复默认"></span></th>`;
+}
+
+// 列宽偏好按“列语义”存 localStorage，用户自己拖过的宽度刷新后仍然生效。
+function readLinkColumnWidths() {
+  const raw = safeStorageGet(linkColumnWidthsStorageKey, "");
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const widths = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const width = Number(value);
+      if (Number.isFinite(width) && width >= linkColumnMinWidth) {
+        widths[key] = Math.round(width);
+      }
+    }
+    return Object.keys(widths).length ? widths : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistLinkColumnWidths(widths) {
+  try {
+    safeStorageSet(linkColumnWidthsStorageKey, JSON.stringify(widths));
+  } catch {
+    // 列宽属于个人视图偏好，写入失败时静默退回默认列宽。
+  }
+}
+
+function linkTableColumnWidths(table) {
+  const widths = {};
+  table.querySelectorAll("thead th[data-col-key]").forEach((cell) => {
+    widths[cell.dataset.colKey] = Math.round(cell.getBoundingClientRect().width);
+  });
+  return widths;
+}
+
+function applyLinkColumnWidths(table, widths) {
+  const keys = Object.keys(widths);
+  if (!keys.length) return;
+  const total = keys.reduce((sum, key) => sum + widths[key], 0);
+  table.classList.add("has-custom-columns");
+  table.querySelectorAll("colgroup col").forEach((column) => {
+    const width = widths[column.dataset.colKey];
+    if (width) {
+      column.style.width = `${width}px`;
+    } else {
+      column.style.removeProperty("width");
+    }
+  });
+  // 有余量时仍铺满容器，宽度超出容器时按用户设定精确滚动。
+  table.style.width = `max(100%, ${total}px)`;
+  table.style.minWidth = "0";
+}
+
+function restoreLinkColumnWidths(table) {
+  const saved = readLinkColumnWidths();
+  if (!saved) return;
+  const present = new Set([...table.querySelectorAll("colgroup col")].map((column) => column.dataset.colKey));
+  const usable = {};
+  for (const [key, width] of Object.entries(saved)) {
+    if (present.has(key)) usable[key] = width;
+  }
+  if (Object.keys(usable).length) applyLinkColumnWidths(table, usable);
+}
+
+function resetLinkColumnWidths() {
+  safeStorageSet(linkColumnWidthsStorageKey, "");
+  const table = $("#linkList table");
+  if (table) {
+    table.classList.remove("has-custom-columns");
+    table.style.removeProperty("width");
+    table.style.removeProperty("min-width");
+    table.querySelectorAll("colgroup col").forEach((column) => column.style.removeProperty("width"));
+  }
+  toast("已恢复默认列宽");
+}
+
+function beginLinkColumnResize(event, resizer) {
+  const table = resizer.closest("table");
+  const key = resizer.dataset.colResize;
+  if (!table || !key) return;
+  event.preventDefault();
+  activeLinkColumnDrag = {
+    table,
+    key,
+    resizer,
+    startX: event.clientX,
+    baseWidths: linkTableColumnWidths(table),
+    widths: null,
+  };
+  resizer.classList.add("is-active");
+  document.body.classList.add("link-column-resizing");
+  window.addEventListener("pointermove", handleLinkColumnResizeMove);
+  window.addEventListener("pointerup", finishLinkColumnResize);
+  window.addEventListener("pointercancel", finishLinkColumnResize);
+}
+
+function handleLinkColumnResizeMove(event) {
+  const drag = activeLinkColumnDrag;
+  if (!drag) return;
+  const delta = event.clientX - drag.startX;
+  if (!delta) return;
+  const base = drag.baseWidths[drag.key];
+  if (!Number.isFinite(base)) return;
+  drag.widths = {
+    ...drag.baseWidths,
+    [drag.key]: Math.max(linkColumnMinWidth, Math.round(base + delta)),
+  };
+  applyLinkColumnWidths(drag.table, drag.widths);
+}
+
+function finishLinkColumnResize() {
+  const drag = activeLinkColumnDrag;
+  if (!drag) return;
+  activeLinkColumnDrag = null;
+  drag.resizer.classList.remove("is-active");
+  document.body.classList.remove("link-column-resizing");
+  window.removeEventListener("pointermove", handleLinkColumnResizeMove);
+  window.removeEventListener("pointerup", finishLinkColumnResize);
+  window.removeEventListener("pointercancel", finishLinkColumnResize);
+  if (drag.widths) persistLinkColumnWidths(drag.widths);
+}
+
+function nudgeLinkColumnWidth(resizer, step) {
+  const table = resizer.closest("table");
+  const key = resizer.dataset.colResize;
+  if (!table || !key) return;
+  const current = linkTableColumnWidths(table);
+  if (!Number.isFinite(current[key])) return;
+  const widths = {
+    ...current,
+    [key]: Math.max(linkColumnMinWidth, Math.round(current[key] + step)),
+  };
+  applyLinkColumnWidths(table, widths);
+  persistLinkColumnWidths(widths);
+}
+
 function renderLinks() {
   const category = $("#linkCategoryFilter")?.value || "";
   const status = $("#linkStatusFilter")?.value || "";
@@ -4786,10 +4945,11 @@ function renderLinks() {
   const canEdit = canOperate("links", "edit");
   const canDelete = canOperate("links", "delete");
   const canManage = canEdit || canDelete;
-  const manageHeader = canManage ? "<th>操作</th>" : "";
+  const columnKeys = linkColumnKeys(canManage);
   $("#linkList").innerHTML = filtered.length ? `
     <table class="link-list-table ${canManage ? "has-manage" : ""}">
-      <thead><tr><th>名称</th><th>适用范围</th><th>地址</th><th>点击</th>${manageHeader}</tr></thead>
+      <colgroup>${columnKeys.map((key) => `<col data-col-key="${key}">`).join("")}</colgroup>
+      <thead><tr>${columnKeys.map(renderLinkColumnHeader).join("")}</tr></thead>
       <tbody>
         ${filtered.map((link) => {
           const scope = [...(link.machine_scope || []), ...(link.process_tags || [])];
@@ -4847,6 +5007,8 @@ function renderLinks() {
         }).join("")}
       </tbody>
     </table>` : "<p>没有匹配的链接</p>";
+  const linkTable = $("#linkList table");
+  if (linkTable) restoreLinkColumnWidths(linkTable);
 }
 
 function renderShiftLine(shift) {
@@ -6783,6 +6945,33 @@ function bindEvents() {
     if (forumTopic && !event.target.closest("button, input, select, textarea, label, a") && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       openForumDetail(forumTopic.dataset.forumPostId).catch((error) => toast(error.message));
+    }
+  });
+
+  document.body.addEventListener("pointerdown", (event) => {
+    const colResizer = event.target.closest?.("[data-col-resize]");
+    if (colResizer) {
+      beginLinkColumnResize(event, colResizer);
+    }
+  });
+
+  document.body.addEventListener("dblclick", (event) => {
+    if (event.target.closest?.("[data-col-resize]")) {
+      resetLinkColumnWidths();
+    }
+  });
+
+  document.body.addEventListener("keydown", (event) => {
+    const colResizer = event.target.closest?.("[data-col-resize]");
+    if (!colResizer) return;
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      nudgeLinkColumnWidth(colResizer, event.key === "ArrowLeft" ? -16 : 16);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      resetLinkColumnWidths();
     }
   });
 

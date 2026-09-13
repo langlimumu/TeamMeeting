@@ -5792,6 +5792,49 @@ th {
   width: 360px;
 }
 
+.link-list-table th[data-col-key] {
+  position: relative;
+}
+
+.link-col-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 9px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.link-col-resizer::after {
+  content: "";
+  position: absolute;
+  top: 22%;
+  left: 50%;
+  width: 2px;
+  height: 56%;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.link-col-resizer:hover::after,
+.link-col-resizer.is-active::after,
+.link-col-resizer:focus-visible::after {
+  background: var(--blue);
+}
+
+.link-col-resizer:focus-visible {
+  outline: none;
+}
+
+body.link-column-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
 .link-list-table td,
 .link-list-table th {
   vertical-align: middle;

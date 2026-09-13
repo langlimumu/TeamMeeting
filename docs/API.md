@@ -11,7 +11,7 @@
 - 错误响应：`{"error": "可读错误原因"}`；
 - 未登录通常返回 401，无权限返回 403，资源不存在返回 404；并发编辑冲突返回 409。
 
-公共域名由本机 Nginx 提供 HTTPS，后端基础地址保持 `http://127.0.0.1:8000`。生产部署默认启用 `TEAM_LOOP_TRUST_PROXY=1` 和 `TEAM_LOOP_REQUIRE_HTTPS=1`：后端仅接受回环代理传入的 `X-Forwarded-For` 与 `X-Forwarded-Proto`，拒绝未经 HTTPS 转发的登录及所有 POST/PATCH/DELETE 请求，HTTPS 会话 Cookie 增加 `Secure`。
+公共域名由本机 Nginx 提供 HTTPS，后端基础地址保持 `http://127.0.0.1:8000`。`TEAM_LOOP_REQUIRE_HTTPS` **默认 `0`，即不强制 HTTPS**，内网可直接以 HTTP 登录与写入；当以 Nginx 终止 TLS 部署时，显式设置 `TEAM_LOOP_TRUST_PROXY=1` 和 `TEAM_LOOP_REQUIRE_HTTPS=1`，后端才会仅接受回环代理传入的 `X-Forwarded-For` 与 `X-Forwarded-Proto`，拒绝未经 HTTPS 转发的登录及所有 POST/PATCH/DELETE 请求，HTTPS 会话 Cookie 增加 `Secure`。
 
 示例：
 

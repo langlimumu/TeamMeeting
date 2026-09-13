@@ -208,6 +208,10 @@ function Start-Environment(
         $env:TEAM_LOOP_RELEASE = $oldRelease
     }
 
+    # 反映子进程的真实行为：未显式设置 TEAM_LOOP_REQUIRE_HTTPS 时不再默认强制 HTTPS。
+    $requireHttpsFlag = ([string]$env:TEAM_LOOP_REQUIRE_HTTPS).Trim().ToLower()
+    $httpsRequired = $requireHttpsFlag -in @("1", "true", "yes", "on")
+
     $metadata = [ordered]@{
         name = $Name
         environment = $Environment
@@ -216,7 +220,7 @@ function Start-Environment(
         database = $DatabasePath
         host = $HostAddress
         port = $Port
-        https_required = ($Environment -eq "production")
+        https_required = $httpsRequired
         pid = $process.Id
         started_at = (Get-Date).ToString("o")
     }

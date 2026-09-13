@@ -36,7 +36,10 @@ BACKUP_DIR = Path(os.environ.get("TEAM_LOOP_BACKUP_DIR") or (DATA_DIR / "backups
 DEPLOY_ENV = (os.environ.get("TEAM_LOOP_ENV") or "development").strip().lower()
 RELEASE_ID = (os.environ.get("TEAM_LOOP_RELEASE") or "local").strip()
 TRUST_PROXY = (os.environ.get("TEAM_LOOP_TRUST_PROXY") or "").strip().lower() in {"1", "true", "yes", "on"}
-REQUIRE_HTTPS = (os.environ.get("TEAM_LOOP_REQUIRE_HTTPS") or ("1" if DEPLOY_ENV == "production" else "0")).strip().lower() in {"1", "true", "yes", "on"}
+# 默认不强制 HTTPS：内网/局域网可直接以 HTTP 部署与登录。
+# 如需在正式环境强制 HTTPS（例如前置 Nginx 终止 TLS），显式设置 TEAM_LOOP_REQUIRE_HTTPS=1，
+# 并同时设置 TEAM_LOOP_TRUST_PROXY=1 以便服务端信任 X-Forwarded-Proto 头。
+REQUIRE_HTTPS = (os.environ.get("TEAM_LOOP_REQUIRE_HTTPS") or "0").strip().lower() in {"1", "true", "yes", "on"}
 SQLITE_BUSY_TIMEOUT_MS = _env_int("TEAM_LOOP_SQLITE_BUSY_TIMEOUT_MS", 15000, 1000, 120000)
 HTTP_MAX_WORKERS = _env_int("TEAM_LOOP_HTTP_MAX_WORKERS", 64, 8, 256)
 HTTP_REQUEST_QUEUE_SIZE = _env_int("TEAM_LOOP_HTTP_REQUEST_QUEUE_SIZE", 256, 32, 1024)

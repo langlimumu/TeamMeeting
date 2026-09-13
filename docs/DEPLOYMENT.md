@@ -125,7 +125,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 -Action Sto
 | `TEAM_LOOP_SSO_HTTP_IDLE_SECONDS` | SSO 空闲连接保留时间，默认 60 秒 |
 | `TEAM_LOOP_SSO_DISCOVERY_CACHE_SECONDS` | OIDC Discovery 缓存时间，默认 300 秒，设为 0 可禁用 |
 | `TEAM_LOOP_TRUST_PROXY` | 设为 `1` 后，仅信任来自本机代理的 `X-Forwarded-For/Proto`；Nginx 部署必须启用 |
-| `TEAM_LOOP_REQUIRE_HTTPS` | 设为 `1` 后，拒绝没有可信 HTTPS 标记的登录及所有写请求；正式部署脚本自动启用 |
+| `TEAM_LOOP_REQUIRE_HTTPS` | 设为 `1` 后，拒绝没有可信 HTTPS 标记的登录及所有写请求；**默认 `0`（不强制）**，便于内网以 HTTP 直接部署；Nginx 终止 TLS 的正式部署需显式设为 `1` |
 
 自定义数据盘示例：
 
@@ -206,7 +206,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\deploy.ps1 `
   -HostAddress 127.0.0.1
 ```
 
-`deploy.ps1` 对正式进程自动设置 `TEAM_LOOP_TRUST_PROXY=1` 和 `TEAM_LOOP_REQUIRE_HTTPS=1`；灰度进程保持本机 HTTP，方便在 8001 端口验收。若绕过部署脚本自行注册 Windows 服务，必须显式设置这两个变量，并确保后端只监听回环地址。
+`TEAM_LOOP_REQUIRE_HTTPS` 不再由部署脚本自动打开，**默认不强制 HTTPS**：直接用 HTTP 访问域名或局域网 IP 也能正常登录，适合内网部署。若前面挂了 Nginx 终止 TLS，请显式设置 `TEAM_LOOP_REQUIRE_HTTPS=1` 和 `TEAM_LOOP_TRUST_PROXY=1`，让后端只接受经 HTTPS 转发的登录与写请求，并确保后端只监听回环地址。
 
 ### 10.3 生成并启动 Nginx 配置
 
