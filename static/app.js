@@ -71,6 +71,9 @@ const state = {
   shifts: [],
   shiftUsers: [],
   ruleUsers: [],
+  dutyRosters: [],
+  dutyUsers: [],
+  dutyToday: [],
   activeShiftPopoverDate: null,
   personalMorningMonthItems: [],
   activePersonalMorningChain: null,
@@ -81,6 +84,8 @@ const state = {
   shiftMonth: new Date(),
   selectedShiftDate: iso(new Date()),
   selectedShiftEndDate: iso(new Date()),
+  dutyMonth: new Date(),
+  selectedDutyDate: iso(new Date()),
   meetingMonth: new Date(),
   meetingListScope: "week",
   selectedMeetingDate: iso(new Date()),
@@ -104,6 +109,7 @@ const pages = [
   ["processes", "✓", "流程中心", "从团队模板生成个人流程，并按 Checklist 推进。"],
   ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
   ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
+  ["oncall", "⌖", "问题定位排班", "按日历安排问题定位值班，页首显示当日值班名单。"],
   ["rules", "★", "红黑榜", "发布规则、记录积分，并按时间查看排行。"],
   ["thanks", "♥", "Thank You", "每周感谢帮助过自己的团队成员。"],
   ["links", "↗", "常用链接", "归档团队常用系统、文档和工具入口。"],
@@ -680,6 +686,12 @@ function shiftPeriodQuery() {
   return `from=${iso(start)}&to=${iso(end)}`;
 }
 
+function dutyPeriodQuery() {
+  const start = monthStart(state.dutyMonth);
+  const end = monthEnd(state.dutyMonth);
+  return `from=${iso(start)}&to=${iso(end)}`;
+}
+
 function meetingPeriodQuery() {
   const start = monthStart(state.meetingMonth);
   const end = monthEnd(state.meetingMonth);
@@ -898,6 +910,7 @@ function populateSelects() {
   const shiftUsers = state.shiftUsers;
   const ruleOptionsUsers = ruleUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const shiftOptionsUsers = shiftUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
+  const dutyOptionsUsers = state.dutyUsers.map((user) => `<option value="${user.id}">${escapeHtml(user.display_name)}</option>`).join("");
   const userOptional = `<option value="">不绑定账号</option>${userOptions}`;
   const ruleOptions = `<option value="">不关联规则</option>${state.rules.map((rule) => `<option value="${rule.id}">${rule.kind === "red" ? "红" : "黑"} · ${escapeHtml(rule.title)}</option>`).join("")}`;
   const machineOptions = state.machines.map((machine) => `<option value="${machine.id}">${escapeHtml(machine.name)}</option>`).join("");
@@ -916,6 +929,7 @@ function populateSelects() {
   $$("[data-morning-users]").forEach((select) => { select.innerHTML = morningOptions; });
   $$("[data-rule-users]").forEach((select) => { select.innerHTML = ruleOptionsUsers; });
   $$("[data-shift-users]").forEach((select) => { select.innerHTML = shiftOptionsUsers; });
+  $$("[data-duty-users]").forEach((select) => { select.innerHTML = dutyOptionsUsers; });
   $$("[data-user-types]").forEach((select) => { select.innerHTML = userTypeOptions; });
   $$("[data-org-units]").forEach((select) => { select.innerHTML = orgOptions; });
   $$("[data-user-type-copy]").forEach((select) => { select.innerHTML = userTypeCopyOptions; });
@@ -5147,6 +5161,160 @@ async function loadShifts() {
   renderCalendar();
 }
 
+function dutyTimeRange(duty) {
+  return `${duty.start_time || "08:30"} - ${duty.end_time || "18:00"}`;
+}
+
+function dutySortOrder(a, b) {
+  const byTime = String(a.start_time || "").localeCompare(String(b.start_time || ""));
+  if (byTime) return byTime;
+  return String(a.display_name || "").localeCompare(String(b.display_name || ""), "zh-CN");
+}
+
+function renderDutyToday() {
+  const target = $("#dutyTodayList");
+  if (!target) return;
+  const dateLabel = $("#dutyTodayDate");
+  const now = new Date();
+  if (dateLabel) {
+    dateLabel.textContent = `${shortDate(iso(now))} ${["周日", "周一", "周二", "周三", "周四", "周五", "周六"][now.getDay()]}`;
+  }
+  const duties = [...(state.dutyToday || [])].sort(dutySortOrder);
+  target.innerHTML = duties.length
+    ? duties.map((duty, index) => `
+      <div class="duty-today-item ${Number(duty.user_id) === Number(state.user?.id) ? "mine" : ""}">
+        <span class="duty-today-rank">${index + 1}</span>
+        <div class="duty-today-main">
+          <strong>${escapeHtml(duty.display_name || "未指定")}</strong>
+          <span>${escapeHtml(dutyTimeRange(duty))}${duty.note ? ` · ${escapeHtml(duty.note)}` : ""}</span>
+        </div>
+        <span class="duty-today-badge">问题定位</span>
+      </div>`).join("")
+    : `<p class="empty-note">今天暂无问题定位值班安排。</p>`;
+}
+
+function renderDutyDayDetail(date, duties) {
+  const target = $("#dutyDayDetail");
+  if (!target) return;
+  if (!duties.length) {
+    target.innerHTML = `<p class="duty-day-empty">${escapeHtml(shortDate(date))} 暂无值班安排</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <p class="duty-day-label">${escapeHtml(shortDate(date))} 值班名单</p>
+    ${duties.map((duty) => `<div class="duty-day-row">
+      <strong>${escapeHtml(dutyTimeRange(duty))}</strong>
+      <span>${escapeHtml(duty.display_name || "")}</span>
+    </div>`).join("")}`;
+}
+
+function renderDutyTable() {
+  const target = $("#dutyTable");
+  if (!target) return;
+  const duties = [...state.dutyRosters].sort(
+    (a, b) => String(a.duty_date).localeCompare(String(b.duty_date)) || dutySortOrder(a, b)
+  );
+  if (!duties.length) {
+    target.innerHTML = `<p class="empty-note">本月暂无问题定位值班安排。</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <table class="duty-table">
+      <thead><tr><th>日期</th><th>时段</th><th>值班人员</th><th>备注</th>${isAdminView() ? "<th>操作</th>" : ""}</tr></thead>
+      <tbody>
+        ${duties.map((duty) => `<tr>
+          <td>${escapeHtml(shortDate(duty.duty_date))}</td>
+          <td class="duty-table-time">${escapeHtml(dutyTimeRange(duty))}</td>
+          <td>${escapeHtml(duty.display_name || "")}</td>
+          <td>${escapeHtml(duty.note || "")}</td>
+          ${isAdminView() ? `<td><button class="danger duty-delete-btn" type="button" data-duty-id="${duty.id}">删除</button></td>` : ""}
+        </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+function renderDutyRank(items = []) {
+  if (!items.length) return `<p>暂无数据</p>`;
+  return items.map((item, index) => `
+    <div class="rank-row duty-rank-row">
+      <span class="rank-no">${index + 1}</span>
+      <strong>${escapeHtml(item.display_name || "未命名")}</strong>
+      <span>${Number(item.duty_count || 0)} 天 · ${Number(item.hours || 0)} 小时</span>
+    </div>`).join("");
+}
+
+function renderDutyCalendar() {
+  const month = state.dutyMonth;
+  const start = monthStart(month);
+  const gridStart = new Date(start);
+  gridStart.setDate(start.getDate() - (start.getDay() || 7) + 1);
+  const byDate = {};
+  state.dutyRosters.forEach((duty) => {
+    byDate[duty.duty_date] ||= [];
+    byDate[duty.duty_date].push(duty);
+  });
+  const monthTitle = $("#dutyMonthTitle");
+  if (monthTitle) monthTitle.textContent = `${month.getFullYear()} 年 ${month.getMonth() + 1} 月`;
+  const dateTitle = $("#selectedDutyDateTitle");
+  if (dateTitle) {
+    dateTitle.textContent = isAdminView()
+      ? `新增值班 · ${state.selectedDutyDate}`
+      : (state.user ? "我的本月值班" : "本月值班");
+  }
+  const startInput = $('input[name="duty_start_date"]');
+  const endInput = $('input[name="duty_end_date"]');
+  if (startInput) startInput.value = state.selectedDutyDate;
+  if (endInput) endInput.value = state.selectedDutyDate;
+
+  const today = iso(new Date());
+  const weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map((day) => `<div class="weekday">${day}</div>`).join("");
+  const cells = [];
+  for (let i = 0; i < 42; i += 1) {
+    const d = new Date(gridStart);
+    d.setDate(gridStart.getDate() + i);
+    const date = iso(d);
+    const duties = [...(byDate[date] || [])].sort(dutySortOrder);
+    const hasMine = duties.some((duty) => Number(duty.user_id) === Number(state.user?.id));
+    cells.push(`<div class="day-cell duty-day ${d.getMonth() !== month.getMonth() ? "other" : ""} ${date === state.selectedDutyDate ? "selected" : ""} ${date === today ? "is-today" : ""} ${hasMine ? "has-mine" : ""} ${duties.length ? "has-duty" : ""}" data-duty-date="${date}" tabindex="0" aria-label="${escapeHtml(`${date}，${duties.length} 人值班`)}">
+      <div class="day-no">${d.getDate()}</div>
+      ${duties.slice(0, 3).map((duty) => `<span class="duty-chip" title="${escapeHtml(`${dutyTimeRange(duty)} ${duty.display_name || ""}`)}"><em>${escapeHtml(duty.start_time || "")}</em><span class="duty-chip-name">${escapeHtml(duty.display_name || "")}</span></span>`).join("")}
+      ${duties.length > 3 ? `<span class="duty-more">+${duties.length - 3} 人</span>` : ""}
+    </div>`);
+  }
+  const calendar = $("#dutyCalendar");
+  if (calendar) calendar.innerHTML = weekdays + cells.join("");
+  renderDutyDayDetail(state.selectedDutyDate, [...(byDate[state.selectedDutyDate] || [])].sort(dutySortOrder));
+  renderDutyTable();
+}
+
+function selectDutyDay(cell) {
+  if (!cell) return;
+  const date = cell.dataset.dutyDate;
+  if (!date) return;
+  state.selectedDutyDate = date;
+  renderDutyCalendar();
+}
+
+async function loadOncall() {
+  const [list, dashboard] = await Promise.all([
+    api(`/api/duty-rosters?${dutyPeriodQuery()}`),
+    api(`/api/dashboards/duty?${dutyPeriodQuery()}`),
+  ]);
+  state.dutyRosters = list.duties || [];
+  state.dutyToday = list.today || [];
+  state.dutyUsers = list.users || [];
+  const stats = $("#dutyStats");
+  if (stats) stats.innerHTML = renderDutyRank(dashboard.by_user || []);
+  populateSelects();
+  renderDutyToday();
+  renderDutyCalendar();
+}
+
+function moveDutyMonth(delta) {
+  state.dutyMonth = new Date(state.dutyMonth.getFullYear(), state.dutyMonth.getMonth() + delta, 1);
+  loadOncall().catch((error) => toast(error.message));
+}
+
 function renderThankPeriodControls() {
   const target = $("#thankPeriodControls");
   if (!target) return;
@@ -5247,6 +5415,7 @@ async function refreshPageData(id = state.currentPage) {
     processes: loadProcesses,
     meetings: loadMeetings,
     shifts: loadShifts,
+    oncall: loadOncall,
     rules: loadRulesAndScores,
     thanks: loadThanks,
     links: loadLinks,
@@ -5268,6 +5437,7 @@ async function refreshAll() {
   if (!isGuest() && canLoadModule("processes")) loaders.push(loadProcesses);
   if (canLoadModule("links")) loaders.push(loadLinks);
   if (canLoadModule("shifts")) loaders.push(loadShifts);
+  if (canLoadModule("oncall")) loaders.push(loadOncall);
   if (canLoadModule("thanks")) loaders.push(loadThanks);
   if (canLoadModule("archive")) loaders.push(loadArchive);
   if (!isGuest() && canLoadModule("dashboard")) loaders.push(loadDashboard);
@@ -6537,6 +6707,8 @@ function bindEvents() {
   $("#nextMonthBtn").addEventListener("click", () => moveMonth(1));
   $("#prevMonthBtn2").addEventListener("click", () => moveMonth(-1));
   $("#nextMonthBtn2").addEventListener("click", () => moveMonth(1));
+  $("#prevDutyMonthBtn").addEventListener("click", () => moveDutyMonth(-1));
+  $("#nextDutyMonthBtn").addEventListener("click", () => moveDutyMonth(1));
   $("#scoreYear")?.addEventListener("change", () => {
     loadRulesAndScores().catch((error) => toast(error.message));
   });
@@ -6667,6 +6839,10 @@ function bindEvents() {
   bindForm("#shiftForm", (data) => {
     state.selectedShiftEndDate = data.shift_end_date || data.shift_start_date || state.selectedShiftDate;
     return api("/api/shifts", { method: "POST", body: JSON.stringify(data) });
+  });
+  bindForm("#dutyForm", (data) => {
+    if (data.duty_start_date) state.selectedDutyDate = data.duty_start_date;
+    return api("/api/duty-rosters", { method: "POST", body: JSON.stringify(data) });
   });
   bindForm("#thankForm", (_, form) => api("/api/thank-you", { method: "POST", body: JSON.stringify(thankFormPayload(form)) }));
   $("#teamChatForm")?.addEventListener("submit", async (event) => {
@@ -7796,6 +7972,21 @@ function bindEvents() {
     const shiftCell = event.target.closest(".shift-day");
     if (shiftCell) {
       selectShiftDay(shiftCell);
+      return;
+    }
+    const dutyDelete = event.target.closest(".duty-delete-btn");
+    if (dutyDelete) {
+      event.stopPropagation();
+      if (!window.confirm("确定删除这条问题定位值班吗？")) return;
+      api(`/api/duty-rosters/${dutyDelete.dataset.dutyId}`, { method: "DELETE" })
+        .then(loadOncall)
+        .then(() => toast("值班已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const dutyCell = event.target.closest(".duty-day");
+    if (dutyCell) {
+      selectDutyDay(dutyCell);
       return;
     }
   });

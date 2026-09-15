@@ -841,7 +841,7 @@ SSO_USERNAME_FALLBACKS = (
 
 SSO_RETURN_VIEWS = {
     "members", "dashboard", "archive", "morning", "processes", "meetings",
-    "shifts", "rules", "thanks", "links", "users", "system",
+    "shifts", "oncall", "rules", "thanks", "links", "users", "system",
 }
 
 
@@ -1358,6 +1358,18 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS duty_rosters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                duty_date TEXT NOT NULL,
+                start_time TEXT NOT NULL DEFAULT '08:30',
+                end_time TEXT NOT NULL DEFAULT '18:00',
+                note TEXT,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS auth_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token_hash TEXT NOT NULL UNIQUE,
@@ -1604,6 +1616,9 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_morning_order ON users(org_unit_id, morning_sort_order, active)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sso_states_expiry ON sso_login_states(expires_at, used_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_date ON shifts(user_id, shift_date)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_duty_rosters_slot ON duty_rosters(org_unit_id, user_id, duty_date, start_time)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_date ON duty_rosters(duty_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_user_date ON duty_rosters(user_id, duty_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moments_org_date ON team_moments(org_unit_id, deleted_at, event_date DESC)")

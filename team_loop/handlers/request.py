@@ -491,6 +491,8 @@ class RequestHandlerMixin:
             return "links"
         if path.startswith("/api/machines") or path.startswith("/api/shifts") or path.startswith("/api/dashboards/shifts"):
             return "shifts"
+        if path.startswith("/api/duty-rosters") or path.startswith("/api/dashboards/duty"):
+            return "oncall"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
         if path.startswith("/api/settings") or path.startswith("/api/sso/diagnose") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
@@ -814,6 +816,20 @@ class RequestHandlerMixin:
             return self.delete_shift(int(parts[2]))
         if path == "/api/dashboards/shifts" and method == "GET":
             return self.shift_dashboard(query)
+
+        if path == "/api/duty-rosters":
+            if method == "GET":
+                return {
+                    "duties": self.list_duty_rosters(query),
+                    "today": self.list_duty_today(),
+                    "users": self.list_current_organization_users(user),
+                }
+            if method == "POST":
+                return self.create_duty_roster()
+        if len(parts) == 3 and parts[:2] == ["api", "duty-rosters"] and method == "DELETE":
+            return self.delete_duty_roster(int(parts[2]))
+        if path == "/api/dashboards/duty" and method == "GET":
+            return self.duty_dashboard(query)
 
         if path == "/api/thank-you":
             if method == "GET":

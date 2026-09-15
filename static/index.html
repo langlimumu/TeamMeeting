@@ -1094,6 +1094,57 @@
             </section>
           </section>
 
+          <section id="oncall" class="page">
+            <section class="panel duty-today-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>今日值班</h2>
+                  <p>按值班开始时间排序，今天负责问题定位的成员一眼可见。</p>
+                </div>
+                <span id="dutyTodayDate" class="duty-today-date"></span>
+              </div>
+              <div id="dutyTodayList" class="duty-today-list"></div>
+            </section>
+
+            <section class="shift-layout">
+              <div class="panel calendar-panel">
+                <div class="calendar-head">
+                  <button id="prevDutyMonthBtn" class="secondary" type="button">上月</button>
+                  <h2 id="dutyMonthTitle"></h2>
+                  <button id="nextDutyMonthBtn" class="secondary" type="button">下月</button>
+                </div>
+                <div id="dutyCalendar" class="calendar"></div>
+                <p class="duty-calendar-hint">点击日期即可在右侧为该日新增问题定位值班。</p>
+              </div>
+
+              <aside class="panel schedule-editor">
+                <h2 id="selectedDutyDateTitle">选择日期</h2>
+                <div id="dutyDayDetail" class="duty-day-detail"></div>
+                <form id="dutyForm" class="form-grid admin-only">
+                  <select name="user_id" data-duty-users required></select>
+                  <label>开始时间<input name="start_time" type="time" value="08:30" required /></label>
+                  <label>结束时间<input name="end_time" type="time" value="18:00" /></label>
+                  <label>开始日期<input name="duty_start_date" type="date" required /></label>
+                  <label>结束日期<input name="duty_end_date" type="date" /></label>
+                  <input name="note" placeholder="备注（如：负责电气类问题）" />
+                  <button class="admin-only">批量添加值班</button>
+                </form>
+                <h3>值班统计</h3>
+                <div id="dutyStats" class="rank-list"></div>
+              </aside>
+            </section>
+
+            <section class="panel admin-only">
+              <div class="panel-title">
+                <div>
+                  <h2>本月值班明细</h2>
+                  <p>按月查看全部问题定位值班，可逐条删除。</p>
+                </div>
+              </div>
+              <div id="dutyTable" class="table"></div>
+            </section>
+          </section>
+
           <section id="rules" class="page">
             <div class="split admin-only">
               <section class="panel">

@@ -1,4 +1,38 @@
+import re
+
 from ..permissions import *
+
+
+DUTY_DEFAULT_START = "08:30"
+DUTY_DEFAULT_END = "18:00"
+DUTY_CLOCK_PATTERN = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+
+
+def normalize_duty_clock(value, fallback):
+    """Validate a HH:MM duty time, falling back to the default when blank."""
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    if not DUTY_CLOCK_PATTERN.match(text):
+        raise AppError(400, f"值班时间格式不正确：{text}，请使用 HH:MM")
+    return text
+
+
+def duty_minutes(value):
+    match = DUTY_CLOCK_PATTERN.match(str(value or "").strip())
+    if not match:
+        return 0
+    return int(match.group(1)) * 60 + int(match.group(2))
+
+
+def duty_hours(start_time, end_time):
+    """Duty length in hours; a slot ending at or before its start wraps past midnight."""
+    start = duty_minutes(start_time)
+    end = duty_minutes(end_time)
+    span = end - start
+    if span <= 0:
+        span += 24 * 60
+    return round(span / 60.0, 2)
 
 
 class OperationsHandlerMixin:
@@ -1443,6 +1477,161 @@ class OperationsHandlerMixin:
                 ).fetchall()
             )
         return {"by_user": by_user, "by_machine": by_machine}
+
+    def list_duty_rosters(self, query):
+        where, params = date_filter(query, "d.duty_date")
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u")
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT d.*, u.display_name
+                    FROM duty_rosters d
+                    JOIN users u ON u.id = d.user_id
+                    WHERE {where} AND {org_where}
+                    ORDER BY d.duty_date DESC, d.start_time, u.display_name
+                    """,
+                    [*params, *org_params],
+                ).fetchall()
+            )
+
+    def list_duty_today(self, day=None):
+        """Duty list for one day, already ordered by start time for the page header."""
+        target = str(day or today_iso())[:10]
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u")
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT d.*, u.display_name
+                    FROM duty_rosters d
+                    JOIN users u ON u.id = d.user_id
+                    WHERE d.duty_date=? AND {org_where}
+                    ORDER BY d.start_time, u.display_name
+                    """,
+                    [target, *org_params],
+                ).fetchall()
+            )
+
+    def create_duty_roster(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        dates = data.get("duty_dates")
+        if isinstance(dates, str):
+            dates = [item.strip() for item in dates.replace("\n", ",").split(",") if item.strip()]
+        if not dates:
+            start = data.get("duty_start_date") or data.get("duty_date") or today_iso()
+            end = data.get("duty_end_date") or start
+            dates = date_range(start, end)
+        dates = list(dict.fromkeys(str(item).strip() for item in dates if str(item).strip()))
+        if not dates:
+            raise AppError(400, "请至少选择一个值班日期")
+        user_id = int(data.get("user_id") or 0)
+        start_time = normalize_duty_clock(data.get("start_time"), DUTY_DEFAULT_START)
+        end_time = normalize_duty_clock(data.get("end_time"), DUTY_DEFAULT_END)
+        note = (data.get("note") or "").strip()
+        with connect() as conn:
+            context = self.organization_context(conn, admin)
+            org_unit_id = (context.get("selected") or {}).get("id")
+            if not org_unit_id:
+                raise AppError(400, "当前团队不存在，无法安排值班")
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            member = conn.execute(
+                f"SELECT id, display_name FROM users u WHERE u.id=? AND active=1 AND {org_where}",
+                [user_id, *org_params],
+            ).fetchone()
+            if not member:
+                raise AppError(404, "值班成员不存在或不在当前团队")
+            conflicts = []
+            for duty_date in dates:
+                try:
+                    dt.date.fromisoformat(duty_date)
+                except ValueError:
+                    raise AppError(400, f"值班日期格式不正确：{duty_date}")
+                duplicate = conn.execute(
+                    "SELECT id FROM duty_rosters WHERE org_unit_id=? AND user_id=? AND duty_date=? AND start_time=?",
+                    (org_unit_id, user_id, duty_date, start_time),
+                ).fetchone()
+                if duplicate:
+                    conflicts.append(f"{duty_date} 该成员同一时段已有值班")
+            if conflicts:
+                detail = "；".join(conflicts[:6])
+                if len(conflicts) > 6:
+                    detail += f"；另有 {len(conflicts) - 6} 天冲突"
+                raise AppError(409, f"值班未保存：{detail}")
+            created_ids = []
+            for duty_date in dates:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO duty_rosters(org_unit_id, user_id, duty_date, start_time, end_time, note, created_by, created_at)
+                    VALUES(?,?,?,?,?,?,?,?)
+                    """,
+                    (org_unit_id, user_id, duty_date, start_time, end_time, note, admin["id"], now_iso()),
+                )
+                created_ids.append(cursor.lastrowid)
+            write_audit(
+                conn,
+                admin,
+                "duty.create",
+                "duty_roster",
+                created_ids[0] if len(created_ids) == 1 else None,
+                "问题定位值班已保存",
+                {"dates": dates, "count": len(created_ids), "user_id": user_id, "start_time": start_time, "end_time": end_time},
+                self.client_address[0],
+            )
+        return {"message": "值班已保存", "duties": self.list_duty_rosters({})}
+
+    def delete_duty_roster(self, duty_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u", admin)
+            duty = conn.execute(
+                f"SELECT d.* FROM duty_rosters d JOIN users u ON u.id=d.user_id WHERE d.id=? AND {org_where}",
+                [duty_id, *org_params],
+            ).fetchone()
+            if not duty:
+                raise AppError(404, "值班记录不存在")
+            conn.execute("DELETE FROM duty_rosters WHERE id=?", (duty_id,))
+            write_audit(
+                conn,
+                admin,
+                "duty.delete",
+                "duty_roster",
+                duty_id,
+                "问题定位值班已删除",
+                {"duty_date": duty["duty_date"], "user_id": duty["user_id"]},
+                self.client_address[0],
+            )
+        return {"message": "值班已删除", "duties": self.list_duty_rosters({})}
+
+    def duty_dashboard(self, query):
+        """Per-member duty tally: days on duty and total hours, for the ranking panel."""
+        where, params = date_filter(query, "d.duty_date")
+        with connect() as conn:
+            org_where, org_params = self.organization_current_user_filter(conn, "u")
+            rows = conn.execute(
+                f"""
+                SELECT d.user_id, u.display_name, d.duty_date, d.start_time, d.end_time
+                FROM duty_rosters d
+                JOIN users u ON u.id = d.user_id
+                WHERE {where} AND {org_where}
+                ORDER BY d.duty_date, d.start_time
+                """,
+                [*params, *org_params],
+            ).fetchall()
+        tally = {}
+        for row in rows:
+            entry = tally.setdefault(
+                row["user_id"],
+                {"id": row["user_id"], "display_name": row["display_name"], "duty_count": 0, "hours": 0.0},
+            )
+            entry["duty_count"] += 1
+            entry["hours"] = round(entry["hours"] + duty_hours(row["start_time"], row["end_time"]), 2)
+        by_user = sorted(
+            tally.values(),
+            key=lambda item: (-item["duty_count"], -item["hours"], item["display_name"] or ""),
+        )
+        return {"by_user": by_user}
 
     def list_thank_you(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")
