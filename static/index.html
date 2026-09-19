@@ -1145,6 +1145,85 @@
             </section>
           </section>
 
+          <section id="norms" class="page">
+            <section class="panel norm-head-panel">
+              <div class="panel-title">
+                <div>
+                  <h2 id="normDocTitle">团队规范</h2>
+                  <p id="normDocMeta">成员随手记的规则标准会立即编入对应分类的文档。</p>
+                </div>
+                <div class="norm-head-actions">
+                  <button id="normScrollTopBtn" class="secondary" type="button">回到文档</button>
+                  <button id="normDownloadBtn" class="secondary" type="button">下载本份 .md</button>
+                </div>
+              </div>
+              <div id="normStats" class="norm-stats"></div>
+            </section>
+
+            <section class="norm-layout">
+              <div class="panel norm-doc-panel">
+                <div class="norm-doc-head">
+                  <div class="norm-doc-head-main">
+                    <h2 id="normDocHeading">规范文档</h2>
+                  </div>
+                </div>
+                <p id="normDocHint" class="norm-doc-hint"></p>
+                <div class="norm-doc-body">
+                  <nav id="normDocNav" class="norm-doc-nav"></nav>
+                  <div id="normDoc" class="norm-doc"></div>
+                </div>
+              </div>
+
+              <aside class="panel norm-side">
+                <section id="normCreatePanel">
+                  <h2 id="normFormTitle">随手记一条规范</h2>
+                  <p class="hint-line">一句话写清要求、选好分类，提交后立即出现在文档里。</p>
+                  <form id="normForm" class="form-grid">
+                    <input type="hidden" name="norm_id" value="" />
+                    <select name="category_id" data-norm-categories required></select>
+                    <input name="title" placeholder="一句话规则，如：提交代码前必须通过静态检查" maxlength="120" required />
+                    <textarea name="content" placeholder="详细说明（选填）：背景、判定口径、例外情况"></textarea>
+                    <input name="scope" placeholder="适用范围（选填，如：全体研发）" />
+                    <input name="source" placeholder="来源（选填，如：2026-09 周例会决议）" />
+                    <label>生效日期<input name="effective_from" type="date" /></label>
+                    <label>失效日期<input name="effective_to" type="date" /></label>
+                    <select id="normStatusSelect" name="status"></select>
+                    <button id="normSubmitBtn">记入规范</button>
+                    <button id="normCancelEditBtn" class="secondary hidden" type="button">取消编辑</button>
+                  </form>
+                </section>
+
+                <section id="normCategoryPanel" class="admin-only">
+                  <h2 id="normCategoryFormTitle">规范分类</h2>
+                  <p class="hint-line">一个分类对应一份文档，分类名就是文档名；可停用不再使用的分类。</p>
+                  <form id="normCategoryForm" class="form-row slim">
+                    <input type="hidden" name="category_id" value="" />
+                    <input name="name" placeholder="分类名称" maxlength="24" required />
+                    <input name="description" placeholder="说明（选填）" />
+                    <button id="normCategorySubmitBtn">新增分类</button>
+                    <button id="normCategoryCancelBtn" class="secondary hidden" type="button">取消</button>
+                  </form>
+                  <div id="normCategoryList" class="norm-category-list"></div>
+                </section>
+              </aside>
+            </section>
+
+            <section class="panel">
+              <div class="panel-title">
+                <div>
+                  <h2>规范条目</h2>
+                  <p>按分类查看全部条目，可编辑自己记录的条目、标记待确认或废止。</p>
+                </div>
+                <div class="norm-filter">
+                  <select id="normCategoryFilter"><option value="">全部分类</option></select>
+                  <input id="normSearchInput" placeholder="搜索关键词" />
+                  <label class="norm-checkbox"><input id="normIncludeAbolished" type="checkbox" /> 含已废止</label>
+                </div>
+              </div>
+              <div id="normList" class="norm-list"></div>
+            </section>
+          </section>
+
           <section id="rules" class="page">
             <div class="split admin-only">
               <section class="panel">

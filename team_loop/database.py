@@ -47,6 +47,27 @@ def seed_link_categories(conn):
         )
 
 
+def seed_norm_categories(conn):
+    units = conn.execute("SELECT id FROM org_units WHERE active=1 ORDER BY sort_order, id").fetchall()
+    if not units:
+        return
+    for unit in units:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM norm_categories WHERE org_unit_id=?",
+            (unit["id"],),
+        ).fetchone()[0]
+        if count:
+            continue
+        for index, (name, description) in enumerate(NORM_DEFAULT_CATEGORIES, start=1):
+            conn.execute(
+                """
+                INSERT INTO norm_categories(org_unit_id, name, description, sort_order, active, created_at)
+                VALUES(?,?,?,?,1,?)
+                """,
+                (unit["id"], name, description, index, now_iso()),
+            )
+
+
 def seed_system_settings(conn):
     for key, label, value, value_type, description in DEFAULT_SETTINGS:
         conn.execute(
@@ -841,7 +862,7 @@ SSO_USERNAME_FALLBACKS = (
 
 SSO_RETURN_VIEWS = {
     "members", "dashboard", "archive", "morning", "processes", "meetings",
-    "shifts", "oncall", "rules", "thanks", "links", "users", "system",
+    "shifts", "oncall", "norms", "rules", "thanks", "links", "users", "system",
 }
 
 
@@ -1370,6 +1391,53 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS norm_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                name TEXT NOT NULL,
+                description TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS norms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                category_id INTEGER REFERENCES norm_categories(id),
+                title TEXT NOT NULL,
+                content TEXT,
+                scope TEXT,
+                source TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                effective_from TEXT,
+                effective_to TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER NOT NULL REFERENCES users(id),
+                updated_by INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by INTEGER
+            );
+
+            -- Reserved for a future document-versioning feature. The norms module does not
+            -- read or write this table today; it stays defined so existing databases need
+            -- no migration and the shape is ready if versioning is introduced later.
+            CREATE TABLE IF NOT EXISTS norm_doc_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                version TEXT NOT NULL,
+                title TEXT NOT NULL,
+                effective_date TEXT,
+                revision_note TEXT,
+                snapshot TEXT NOT NULL DEFAULT '{}',
+                change_summary TEXT NOT NULL DEFAULT '{}',
+                norm_count INTEGER NOT NULL DEFAULT 0,
+                published_by INTEGER NOT NULL REFERENCES users(id),
+                published_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS auth_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token_hash TEXT NOT NULL UNIQUE,
@@ -1619,6 +1687,11 @@ def init_db():
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_duty_rosters_slot ON duty_rosters(org_unit_id, user_id, duty_date, start_time)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_date ON duty_rosters(duty_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_user_date ON duty_rosters(user_id, duty_date)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_norm_categories_unit_name ON norm_categories(org_unit_id, name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_categories_unit ON norm_categories(org_unit_id, sort_order, active)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norms_unit_category ON norms(org_unit_id, deleted_at, status, sort_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norms_category ON norms(category_id, sort_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_versions_unit ON norm_doc_versions(org_unit_id, published_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_moments_org_date ON team_moments(org_unit_id, deleted_at, event_date DESC)")
@@ -1653,6 +1726,7 @@ def init_db():
         migrate_team_scoped_machines(conn)
         seed_meeting_topics(conn)
         seed_link_categories(conn)
+        seed_norm_categories(conn)
         seed_system_settings(conn)
         conn.execute(
             """

@@ -35,6 +35,82 @@ def duty_hours(start_time, end_time):
     return round(span / 60.0, 2)
 
 
+NORM_OTHER_CHAPTER_NAME = "其他"
+
+
+def parse_norm_date(value, label):
+    """Normalize an optional ISO date, returning None when blank."""
+    text = str(value or "").strip()[:10]
+    if not text:
+        return None
+    try:
+        dt.date.fromisoformat(text)
+    except ValueError:
+        raise AppError(400, f"{label}格式不正确：{value}")
+    return text
+
+
+def norm_state(row):
+    """Effective state of one norm: active / scheduled / expired / pending / abolished."""
+    status = str(row.get("status") or "active")
+    if status == "abolished":
+        return "abolished"
+    if status == "pending":
+        return "pending"
+    today = today_iso()
+    if row.get("effective_to") and str(row["effective_to"]) < today:
+        return "expired"
+    if row.get("effective_from") and str(row["effective_from"]) > today:
+        return "scheduled"
+    return "active"
+
+
+def build_norm_markdown(title, chapters, extra_lines=None):
+    """Render one category document into plain Markdown."""
+    chapters = chapters or []
+    lines = [f"# {title}", ""]
+    meta = [f"- 条款数量：{sum(len(chapter.get('articles') or []) for chapter in chapters)}"]
+    for item in extra_lines or []:
+        meta.append(item)
+    meta.append(f"- 导出时间：{now_iso()}")
+    lines.extend(meta)
+    lines.append("")
+    single = len(chapters) == 1
+    if chapters and not single:
+        lines.append("## 目录")
+        lines.append("")
+        for chapter in chapters:
+            lines.append(f"- {str(chapter.get('no', '')).strip()} {str(chapter.get('name', '')).strip()}".rstrip())
+        lines.append("")
+    for chapter in chapters:
+        if not single:
+            lines.append(f"## {str(chapter.get('no', '')).strip()} {str(chapter.get('name', '')).strip()}".rstrip())
+            lines.append("")
+        if chapter.get("description"):
+            lines.append(str(chapter["description"]))
+            lines.append("")
+        for article in chapter.get("articles") or []:
+            lines.append(f"### {str(article.get('no', '')).strip()} {str(article.get('title', '')).strip()}".rstrip())
+            if article.get("content"):
+                lines.append("")
+                lines.append(str(article["content"]))
+            details = []
+            if article.get("scope"):
+                details.append(f"适用范围：{article['scope']}")
+            if article.get("source"):
+                details.append(f"来源：{article['source']}")
+            if article.get("effective_from"):
+                details.append(f"生效日期：{article['effective_from']}")
+            if article.get("created_by_name"):
+                details.append(f"记录人：{article['created_by_name']}")
+            if details:
+                lines.append("")
+                for detail in details:
+                    lines.append(f"- {detail}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 class OperationsHandlerMixin:
     def list_rules(self, query):
         clauses = ["1=1"]
@@ -1969,5 +2045,419 @@ class OperationsHandlerMixin:
                     (user["id"], key, now_iso()),
                 )
         return self.list_reminders(user)
+
+    # ---- 团队规范：分类 -> 条目 -> 自动成文 -> 版本发布 ----
+
+    def norm_document_title(self, conn):
+        team_name = (get_setting_value(conn, "app_team_name", "") or "").strip()
+        return f"{team_name}规范" if team_name else "团队规范"
+
+    def list_norm_categories(self):
+        user = getattr(self, "api_user", None)
+        with connect() as conn:
+            where, params = self.organization_current_entity_filter(conn, "c.org_unit_id", user)
+            return rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT c.*,
+                           (SELECT COUNT(*) FROM norms n
+                             WHERE n.category_id=c.id AND n.deleted_at IS NULL) AS norm_count
+                    FROM norm_categories c
+                    WHERE {where}
+                    ORDER BY c.sort_order, c.id
+                    """,
+                    params,
+                ).fetchall()
+            )
+
+    def require_current_org_unit_id(self, conn, user, purpose):
+        context = self.organization_context(conn, user)
+        org_unit_id = (context.get("selected") or {}).get("id")
+        if not org_unit_id:
+            raise AppError(400, f"当前团队不存在，无法{purpose}")
+        return org_unit_id
+
+    def create_norm_category(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        name = (data.get("name") or "").strip()
+        if not name:
+            raise AppError(400, "请填写分类名称")
+        if len(name) > 24:
+            raise AppError(400, "分类名称不超过 24 字")
+        description = (data.get("description") or "").strip()
+        with connect() as conn:
+            org_unit_id = self.require_current_org_unit_id(conn, admin, "新增规范分类")
+            exists = conn.execute(
+                "SELECT id FROM norm_categories WHERE org_unit_id=? AND name=?",
+                (org_unit_id, name),
+            ).fetchone()
+            if exists:
+                raise AppError(409, f"分类「{name}」已存在")
+            sort_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM norm_categories WHERE org_unit_id=?",
+                (org_unit_id,),
+            ).fetchone()[0]
+            cursor = conn.execute(
+                """
+                INSERT INTO norm_categories(org_unit_id, name, description, sort_order, active, created_at)
+                VALUES(?,?,?,?,1,?)
+                """,
+                (org_unit_id, name, description, sort_order, now_iso()),
+            )
+            write_audit(conn, admin, "norm_category.create", "norm_category", cursor.lastrowid, "规范分类已新增", {"name": name}, self.client_address[0])
+        return {"message": "分类已新增", "categories": self.list_norm_categories()}
+
+    def update_norm_category(self, category_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            org_unit_id = self.require_current_org_unit_id(conn, admin, "维护规范分类")
+            category = conn.execute(
+                "SELECT * FROM norm_categories WHERE id=? AND org_unit_id=?",
+                (category_id, org_unit_id),
+            ).fetchone()
+            if not category:
+                raise AppError(404, "规范分类不存在")
+            name = (data.get("name") or category["name"]).strip()
+            if not name:
+                raise AppError(400, "请填写分类名称")
+            if len(name) > 24:
+                raise AppError(400, "分类名称不超过 24 字")
+            if name != category["name"]:
+                duplicate = conn.execute(
+                    "SELECT id FROM norm_categories WHERE org_unit_id=? AND name=? AND id<>?",
+                    (org_unit_id, name, category_id),
+                ).fetchone()
+                if duplicate:
+                    raise AppError(409, f"分类「{name}」已存在")
+            description = (data.get("description") or "").strip()
+            active = 1 if str(data.get("active", category["active"])).lower() not in {"0", "false", "no"} else 0
+            if not active and category["active"]:
+                used = conn.execute(
+                    "SELECT COUNT(*) FROM norms WHERE category_id=? AND deleted_at IS NULL",
+                    (category_id,),
+                ).fetchone()[0]
+                if used:
+                    raise AppError(409, f"该分类下还有 {used} 条规范，请先移动到其他分类再停用")
+            conn.execute(
+                "UPDATE norm_categories SET name=?, description=?, active=? WHERE id=?",
+                (name, description, active, category_id),
+            )
+            write_audit(conn, admin, "norm_category.update", "norm_category", category_id, "规范分类已更新", {"name": name, "active": active}, self.client_address[0])
+        return {"message": "分类已更新", "categories": self.list_norm_categories()}
+
+    def delete_norm_category(self, category_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            org_unit_id = self.require_current_org_unit_id(conn, admin, "删除规范分类")
+            category = conn.execute(
+                "SELECT * FROM norm_categories WHERE id=? AND org_unit_id=?",
+                (category_id, org_unit_id),
+            ).fetchone()
+            if not category:
+                raise AppError(404, "规范分类不存在")
+            used = conn.execute(
+                "SELECT COUNT(*) FROM norms WHERE category_id=? AND deleted_at IS NULL",
+                (category_id,),
+            ).fetchone()[0]
+            if used:
+                raise AppError(409, f"该分类下还有 {used} 条规范，请先移动到其他分类再删除")
+            conn.execute("DELETE FROM norm_categories WHERE id=?", (category_id,))
+            write_audit(conn, admin, "norm_category.delete", "norm_category", category_id, "规范分类已删除", {"name": category["name"]}, self.client_address[0])
+        return {"message": "分类已删除", "categories": self.list_norm_categories()}
+
+    def list_norms(self, query):
+        user = getattr(self, "api_user", None)
+        include_abolished = str((query.get("include_abolished") or [""])[0]).lower() in {"1", "true", "yes", "on"}
+        keyword = (query.get("q") or [""])[0].strip()
+        raw_category = (query.get("category_id") or [""])[0].strip()
+        with connect() as conn:
+            org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
+            clauses = ["n.deleted_at IS NULL", org_where]
+            params = [*org_params]
+            if not include_abolished:
+                clauses.append("n.status<>'abolished'")
+            if raw_category:
+                try:
+                    category_id = int(raw_category)
+                except (TypeError, ValueError):
+                    raise AppError(400, "规范分类参数不正确")
+                clauses.append("n.category_id=?")
+                params.append(category_id)
+            if keyword:
+                like = f"%{keyword}%"
+                clauses.append("(n.title LIKE ? OR n.content LIKE ? OR n.scope LIKE ? OR n.source LIKE ?)")
+                params.extend([like, like, like, like])
+            rows = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT n.*, u.display_name AS created_by_name,
+                           c.name AS category_name, c.sort_order AS category_order
+                    FROM norms n
+                    LEFT JOIN users u ON u.id=n.created_by
+                    LEFT JOIN norm_categories c ON c.id=n.category_id
+                    WHERE {' AND '.join(clauses)}
+                    ORDER BY COALESCE(c.sort_order, 9999), n.sort_order, n.id
+                    """,
+                    params,
+                ).fetchall()
+            )
+        for row in rows:
+            row["state"] = norm_state(row)
+        return rows
+
+    def find_norm(self, conn, norm_id, user):
+        org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
+        norm = conn.execute(
+            f"SELECT * FROM norms n WHERE n.id=? AND n.deleted_at IS NULL AND {org_where}",
+            [norm_id, *org_params],
+        ).fetchone()
+        if not norm:
+            raise AppError(404, "规范条目不存在")
+        return norm
+
+    def can_edit_norm(self, norm, user):
+        if not user:
+            return False
+        if user.get("role") == "admin":
+            return True
+        return int(norm["created_by"] or 0) == int(user["id"])
+
+    def resolve_norm_category(self, conn, raw_value, org_unit_id):
+        try:
+            category_id = int(raw_value or 0)
+        except (TypeError, ValueError):
+            raise AppError(400, "规范分类参数不正确")
+        if not category_id:
+            raise AppError(400, "请选择规范分类")
+        category = conn.execute(
+            "SELECT id, name, active FROM norm_categories WHERE id=? AND org_unit_id=?",
+            (category_id, org_unit_id),
+        ).fetchone()
+        if not category:
+            raise AppError(404, "规范分类不存在")
+        if not category["active"]:
+            raise AppError(400, f"分类「{category['name']}」已停用，请选择其他分类")
+        return category_id
+
+    def create_norm(self, user=None):
+        actor = user or self.current_user()
+        data = read_json(self)
+        title = (data.get("title") or "").strip()
+        if not title:
+            raise AppError(400, "请填写一句话规则，例如「提交代码前必须通过静态检查」")
+        if len(title) > 120:
+            raise AppError(400, "一句话规则不要超过 120 字")
+        content = (data.get("content") or "").strip()
+        scope = (data.get("scope") or "").strip()
+        source = (data.get("source") or "").strip()
+        effective_from = parse_norm_date(data.get("effective_from"), "生效日期") or today_iso()
+        effective_to = parse_norm_date(data.get("effective_to"), "失效日期")
+        if effective_to and effective_to < effective_from:
+            raise AppError(400, "失效日期不能早于生效日期")
+        with connect() as conn:
+            org_unit_id = self.require_current_org_unit_id(conn, actor, "记录团队规范")
+            category_id = self.resolve_norm_category(conn, data.get("category_id"), org_unit_id)
+            sort_order = conn.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM norms WHERE org_unit_id=? AND category_id=?",
+                (org_unit_id, category_id),
+            ).fetchone()[0]
+            cursor = conn.execute(
+                """
+                INSERT INTO norms(org_unit_id, category_id, title, content, scope, source, status,
+                                  effective_from, effective_to, sort_order, created_by, updated_by,
+                                  created_at, updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    org_unit_id, category_id, title, content, scope, source, "active",
+                    effective_from, effective_to, sort_order, actor["id"], actor["id"],
+                    now_iso(), now_iso(),
+                ),
+            )
+            write_audit(conn, actor, "norm.create", "norm", cursor.lastrowid, "团队规范条目已记录", {"title": title, "category_id": category_id}, self.client_address[0])
+        return {"message": "规范已记入文档", "norms": self.list_norms({})}
+
+    def update_norm(self, norm_id, user=None):
+        actor = user or self.current_user()
+        data = read_json(self)
+        with connect() as conn:
+            norm = self.find_norm(conn, norm_id, actor)
+            if not self.can_edit_norm(norm, actor):
+                raise AppError(403, "只能修改自己记录的规范条目，或联系管理员处理")
+            title = (data.get("title") or norm["title"]).strip()
+            if not title:
+                raise AppError(400, "请填写一句话规则")
+            if len(title) > 120:
+                raise AppError(400, "一句话规则不要超过 120 字")
+            status = str(data.get("status") or norm["status"] or "active").strip()
+            if status not in NORM_STATUSES:
+                raise AppError(400, "规范状态不正确")
+            if status == "pending" and actor.get("role") != "admin":
+                raise AppError(403, "仅管理员可以标记待确认")
+            content = (data.get("content") if "content" in data else norm["content"] or "")
+            scope = (data.get("scope") if "scope" in data else norm["scope"] or "")
+            source = (data.get("source") if "source" in data else norm["source"] or "")
+            effective_from = parse_norm_date(
+                data.get("effective_from") if "effective_from" in data else norm["effective_from"],
+                "生效日期",
+            ) or today_iso()
+            effective_to = parse_norm_date(
+                data.get("effective_to") if "effective_to" in data else norm["effective_to"],
+                "失效日期",
+            )
+            if effective_to and effective_to < effective_from:
+                raise AppError(400, "失效日期不能早于生效日期")
+            category_id = norm["category_id"]
+            if data.get("category_id"):
+                category_id = self.resolve_norm_category(conn, data.get("category_id"), norm["org_unit_id"])
+            conn.execute(
+                """
+                UPDATE norms
+                SET category_id=?, title=?, content=?, scope=?, source=?, status=?,
+                    effective_from=?, effective_to=?, updated_by=?, updated_at=?
+                WHERE id=?
+                """,
+                (
+                    category_id, title, str(content or "").strip(), str(scope or "").strip(), str(source or "").strip(),
+                    status, effective_from, effective_to, actor["id"], now_iso(), norm_id,
+                ),
+            )
+            write_audit(conn, actor, "norm.update", "norm", norm_id, "团队规范条目已更新", {"title": title, "status": status}, self.client_address[0])
+        return {"message": "规范已更新", "norms": self.list_norms({})}
+
+    def delete_norm(self, norm_id, user=None):
+        actor = user or self.current_user()
+        with connect() as conn:
+            norm = self.find_norm(conn, norm_id, actor)
+            conn.execute(
+                "UPDATE norms SET deleted_at=?, deleted_by=? WHERE id=?",
+                (now_iso(), actor["id"], norm_id),
+            )
+            add_recycle_record(
+                conn,
+                "norm",
+                norm_id,
+                norm["title"],
+                actor,
+                {"title": norm["title"], "category_id": norm["category_id"]},
+            )
+            write_audit(conn, actor, "norm.delete", "norm", norm_id, "团队规范条目已删除", {"title": norm["title"]}, self.client_address[0])
+        return {"message": "规范已删除", "norms": self.list_norms({})}
+
+    def assemble_norm_documents(self, conn, user):
+        """One document per category, its clauses numbered from 1 inside that document.
+
+        A category owns a document instead of being a chapter of one big file. Because
+        each document stands alone, its clauses are numbered 1, 2, 3 ... within that
+        document instead of carrying the category index as a prefix. Every category is
+        listed even when empty, because the navigation mirrors the shelves the team
+        maintains.
+        """
+        org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
+        cat_where, cat_params = self.organization_current_entity_filter(conn, "c.org_unit_id", user)
+        categories = rows_to_list(
+            conn.execute(
+                f"""
+                SELECT id, name, description, sort_order
+                FROM norm_categories c
+                WHERE {cat_where}
+                ORDER BY c.sort_order, c.id
+                """,
+                cat_params,
+            ).fetchall()
+        )
+        articles = rows_to_list(
+            conn.execute(
+                f"""
+                SELECT n.id, n.category_id, n.title, n.content, n.scope, n.source, n.status,
+                       n.effective_from, n.effective_to, n.sort_order, n.created_at,
+                       u.display_name AS created_by_name
+                FROM norms n
+                LEFT JOIN users u ON u.id=n.created_by
+                WHERE n.deleted_at IS NULL AND n.status='active' AND {org_where}
+                  AND (n.effective_to IS NULL OR n.effective_to='' OR n.effective_to >= ?)
+                ORDER BY n.sort_order, n.id
+                """,
+                [*org_params, today_iso()],
+            ).fetchall()
+        )
+        grouped = {}
+        for row in articles:
+            grouped.setdefault(row["category_id"], []).append(row)
+        buckets = [
+            (category["id"], category["name"], category["description"] or "")
+            for category in categories
+        ]
+        known = {category["id"] for category in categories}
+        if any(row["category_id"] not in known for row in articles):
+            buckets.append((None, NORM_OTHER_CHAPTER_NAME, "尚未归入分类的规范条目"))
+        documents = []
+        for category_id, name, description in buckets:
+            chapter = {"name": name, "description": description, "articles": []}
+            for article_index, row in enumerate(grouped.get(category_id) or [], start=1):
+                chapter["articles"].append(
+                    {
+                        "no": str(article_index),
+                        "id": row["id"],
+                        "title": row["title"],
+                        "content": row["content"] or "",
+                        "scope": row["scope"] or "",
+                        "source": row["source"] or "",
+                        "effective_from": row["effective_from"] or "",
+                        "effective_to": row["effective_to"] or "",
+                        "created_by_name": row["created_by_name"] or "",
+                        "created_at": row["created_at"],
+                    }
+                )
+            title = name if name.endswith("规范") else f"{name}规范"
+            documents.append(
+                {
+                    "category_id": category_id,
+                    "name": name,
+                    "description": description,
+                    "title": title,
+                    "article_count": len(chapter["articles"]),
+                    "chapters": [chapter],
+                    "markdown": build_norm_markdown(title, [chapter]),
+                }
+            )
+        return documents
+
+    def norm_document(self):
+        """Every category as its own document, assembled from `norms` on every read.
+
+        Nothing is frozen here: a document is the live projection of the entries, so
+        recording or editing a norm shows up immediately.
+        """
+        user = getattr(self, "api_user", None)
+        with connect() as conn:
+            documents = self.assemble_norm_documents(conn, user)
+            org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
+            counts = conn.execute(
+                f"""
+                SELECT COUNT(*) AS total,
+                       SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active_count,
+                       SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
+                       SUM(CASE WHEN status='abolished' THEN 1 ELSE 0 END) AS abolished_count
+                FROM norms n
+                WHERE n.deleted_at IS NULL AND {org_where}
+                """,
+                org_params,
+            ).fetchone()
+            document = {
+                "title": self.norm_document_title(conn),
+                "generated_at": now_iso(),
+                "documents": documents,
+                "stats": {
+                    "total": int(counts["total"] or 0) if counts else 0,
+                    "active": int(counts["active_count"] or 0) if counts else 0,
+                    "pending": int(counts["pending_count"] or 0) if counts else 0,
+                    "abolished": int(counts["abolished_count"] or 0) if counts else 0,
+                    "category_count": len(documents),
+                },
+            }
+        return {"document": document}
 
 

@@ -230,7 +230,30 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | POST | `/api/backups/verify` | 校验备份完整性 |
 | POST | `/api/backups/restore` | 恢复指定备份 |
 
-## 10. 扩展 API 的检查项
+## 10. 团队规范
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/api/norm-categories` | 规范分类 |
+| PATCH/DELETE | `/api/norm-categories/{id}` | 改名、排序、停用或删除分类 |
+| GET/POST | `/api/norms` | 规范条目；查询支持 `category_id`、`q`、`include_abolished` |
+| PATCH/DELETE | `/api/norms/{id}` | 修改或软删除条目 |
+| GET | `/api/norms/document` | 全部分类文档：每个分类一份，各自带 Markdown |
+
+文档按分类拆分为多份，`GET /api/norms/document` 一次返回全部：
+
+- `documents`：数组，每个分类一项，含 `category_id`（未归类的桶为 `null`）、`name`、`description`、`title`（`{分类名}规范`）、`article_count`、`chapters`（单元素数组）与 `markdown`。
+- `stats`：`total` / `active` / `pending` / `abolished` / `category_count`。
+
+**条款号是「份内序号」**：每份文档从 `1` 开始按记录顺序排（`1`、`2`、`3`…），不带分类前缀。文档之间靠 `category_id` 与 `title` 区分，不再有全局编号，因此分类增删或排序都不会让已有编号发生变化。跨文档引用用文字表述，如「见《研发流程规范》第 2 条」。
+
+未引入版本概念：文档是 `norms` 表的实时投影，随手记或修改后立即重排，没有草稿/正式版之分，也没有快照。`norm_doc_versions` 表保留在建表语句中，但当前没有任何接口读写它。
+
+进入文档的条件是 `status='active'` 且（`effective_to` 为空或 ≥ 今天）；`pending`（管理员复核标记）与 `abolished` 都不进文档。**空分类也会保留一份空文档**，让导航与「规范分类」一一对应，不会出现"刚建的分类不见了"。
+
+分类下仍有未删除条目时，停用与删除分类都会返回 409，避免条款从文档中凭空消失。删除条目走软删除并进入回收站（`entity_type` 为 `norm`）。
+
+## 11. 扩展 API 的检查项
 
 新增接口时同时确认：
 

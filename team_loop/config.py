@@ -98,6 +98,17 @@ TEAM_MOMENT_IMAGE_TYPES = {
 TEAM_MOMENT_MAX_IMAGES = 6
 TEAM_MOMENT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
+NORM_STATUSES = {"active", "pending", "abolished"}
+# 预置规范分类：新团队首次启动时按组织单元播种一次，之后由管理员自行维护。
+NORM_DEFAULT_CATEGORIES = [
+    ("研发流程", "需求、开发、评审、发布等研发环节的统一要求"),
+    ("设备与操作", "设备使用、点检与标准作业要求"),
+    ("安全环保", "安全红线、环保与现场管理要求"),
+    ("质量与验收", "质量标准、验收口径与判定规则"),
+    ("值班与响应", "值班安排、问题响应与升级时限"),
+    ("文档与协作", "文档、命名、沟通与协作约定"),
+]
+
 MODULE_CATALOG = [
     {"key": "members", "name": "团队成员", "description": "成员档案、职责画像和团队对话"},
     {"key": "moments", "name": "团队时刻", "description": "用图片和事迹沉淀团队关键事件"},
@@ -108,6 +119,7 @@ MODULE_CATALOG = [
     {"key": "meetings", "name": "会议沙盘", "description": "周例会议题、纪要和签到"},
     {"key": "shifts", "name": "机台排班", "description": "白夜班排班和工时统计"},
     {"key": "oncall", "name": "问题定位排班", "description": "按日历安排问题定位值班，页首直达当日值班名单"},
+    {"key": "norms", "name": "团队规范", "description": "成员随手记规则标准，系统自动装配成统一规范文档"},
     {"key": "rules", "name": "红黑榜", "description": "红黑榜细则和积分看板"},
     {"key": "thanks", "name": "Thank You", "description": "团队感谢墙和 Thank You 之星"},
     {"key": "links", "name": "常用链接", "description": "系统、文档和工具入口"},
@@ -138,6 +150,7 @@ INITIAL_TYPE_OPERATIONS = {
         "meetings": (1, 1, 1, 0),
         "shifts": (1, 0, 0, 0),
         "oncall": (1, 0, 0, 0),
+        "norms": (1, 1, 1, 0),
         "rules": (1, 0, 0, 0),
         "thanks": (1, 1, 1, 1),
         "links": (1, 1, 1, 1),

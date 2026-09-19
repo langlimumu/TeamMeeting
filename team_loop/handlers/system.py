@@ -23,6 +23,7 @@ class SystemHandlerMixin:
             "team_reply": "团队回复",
             "meeting_item": "会议议题",
             "team_moment": "团队时刻",
+            "norm": "规范条目",
         }
         for item in items:
             item["entity_label"] = labels.get(item["entity_type"], item["entity_type"])
@@ -59,6 +60,8 @@ class SystemHandlerMixin:
                 )
             elif entity_type == "team_moment":
                 conn.execute("UPDATE team_moments SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
+            elif entity_type == "norm":
+                conn.execute("UPDATE norms SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
             elif entity_type == "user":
                 conn.execute("UPDATE users SET active=1 WHERE id=?", (item["entity_id"],))
                 conn.execute("UPDATE members SET active=1 WHERE user_id=?", (item["entity_id"],))
@@ -96,6 +99,8 @@ class SystemHandlerMixin:
                 conn.execute(f"DELETE FROM team_post_replies WHERE id IN ({placeholders})", reply_ids)
             elif item["entity_type"] == "team_moment":
                 conn.execute("DELETE FROM team_moments WHERE id=?", (item["entity_id"],))
+            elif item["entity_type"] == "norm":
+                conn.execute("DELETE FROM norms WHERE id=?", (item["entity_id"],))
             else:
                 raise AppError(400, "该类型暂不支持彻底删除")
             conn.execute(

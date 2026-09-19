@@ -1093,6 +1093,7 @@ body.modal-open {
   align-items: center;
   gap: 11px;
   padding: 4px 6px 12px;
+  flex: 0 0 auto;
 }
 
 .brand strong {
@@ -1121,10 +1122,26 @@ body.modal-open {
   box-shadow: 0 8px 18px rgba(47, 107, 255, 0.16);
 }
 
-nav {
+/* 侧栏导航：下面这些 nav 规则只针对 .sidebar 内的导航条。
+   历史上写成裸 nav 选择器，会误伤页面上其它 <nav>（例如规范文档的分类导航），
+   因此统一收窄到 .sidebar nav。 */
+.sidebar nav {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+/* 桌面端侧栏高度锁死 100vh，菜单变多后必须让「导航区」自己滚动，
+   否则会把底部的账户区（修改密码 / 退出登录）顶到屏幕外。
+   注意：不能给 .sidebar 加 overflow —— .org-tree-panel 是绝对定位弹层，会被裁掉。 */
+@media (min-width: 901px) {
+  .sidebar nav {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+  }
 }
 
 .nav-item {
@@ -1165,6 +1182,7 @@ nav {
   border-top: 1px solid var(--line);
   display: grid;
   gap: 10px;
+  flex: 0 0 auto;
 }
 
 .theme-switcher {
@@ -1940,9 +1958,13 @@ main {
 }
 
 .score-visibility-settings input {
+  flex: 0 0 auto;
   width: 16px;
+  min-width: 0;
   height: 16px;
+  min-height: 16px;
   margin: 0;
+  padding: 0;
 }
 
 .score-visibility-settings button {
@@ -6296,6 +6318,11 @@ body.link-column-resizing {
   font-weight: 700;
 }
 
+/* 同 .norm-actions-cell：flex 必须挂在内层 div，不能直接挂 td */
+.user-actions-cell {
+  white-space: nowrap;
+}
+
 .user-row-actions {
   display: flex;
   gap: 6px;
@@ -7165,7 +7192,7 @@ body[data-theme="miro"] .login-logo {
   box-shadow: none;
 }
 
-body[data-theme="miro"] nav {
+body[data-theme="miro"] .sidebar nav {
   gap: 6px;
 }
 
@@ -8215,7 +8242,7 @@ body[data-theme="dingtalk"] .brand {
   min-width: 170px;
 }
 
-body[data-theme="dingtalk"] nav {
+body[data-theme="dingtalk"] .sidebar nav {
   display: flex;
   flex-direction: row;
   gap: 4px;
@@ -8640,8 +8667,8 @@ body[data-theme="miro"] #memberList .tag {
     overflow: visible;
   }
 
-  nav,
-  body[data-theme] nav {
+  .sidebar nav,
+  body[data-theme] .sidebar nav {
     grid-area: nav;
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
@@ -8687,7 +8714,7 @@ body[data-theme="miro"] #memberList .tag {
     height: auto;
   }
 
-  body[data-theme="dingtalk"] nav {
+  body[data-theme="dingtalk"] .sidebar nav {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
   }
@@ -8919,8 +8946,8 @@ body[data-theme="miro"] #memberList .tag {
     padding: 14px;
   }
 
-  nav,
-  body[data-theme] nav,
+  .sidebar nav,
+  body[data-theme] .sidebar nav,
   .toolbar,
   body[data-theme] .toolbar,
   .period-controls,
@@ -8962,9 +8989,9 @@ body[data-theme="miro"] #memberList .tag {
     max-height: min(420px, calc(100vh - 130px));
   }
 
-  nav,
-  body[data-theme] nav,
-  body[data-theme="dingtalk"] nav {
+  .sidebar nav,
+  body[data-theme] .sidebar nav,
+  body[data-theme="dingtalk"] .sidebar nav {
     width: 100%;
     display: flex;
     flex-direction: row;
@@ -9895,6 +9922,7 @@ body[data-theme] .forum-hot-list small { color: #4b5565; }
   position: relative;
   margin: 10px 12px 6px;
   min-width: 0;
+  flex: 0 0 auto;
 }
 
 .org-switcher.tree-open {
@@ -11331,9 +11359,9 @@ body[data-theme] .org-tree-node.active .org-tree-select {
     border-radius: 0;
   }
 
-  nav,
-  body[data-theme] nav,
-  body[data-theme="dingtalk"] nav {
+  .sidebar nav,
+  body[data-theme] .sidebar nav,
+  body[data-theme="dingtalk"] .sidebar nav {
     display: flex;
     grid-area: auto;
     min-width: 0;
@@ -11398,9 +11426,9 @@ body[data-theme] .org-tree-node.active .org-tree-select {
     padding: 10px 12px;
   }
 
-  nav,
-  body[data-theme] nav,
-  body[data-theme="dingtalk"] nav {
+  .sidebar nav,
+  body[data-theme] .sidebar nav,
+  body[data-theme="dingtalk"] .sidebar nav {
     display: flex;
     width: 100%;
     padding-bottom: 2px;
@@ -11863,4 +11891,515 @@ body[data-theme] .morning-navigator .morning-nav-order-actions button:hover {
 .duty-rank-row span:last-child {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* ---- 团队规范 ---- */
+
+.norm-head-panel .panel-title {
+  align-items: flex-start;
+}
+
+.norm-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.norm-head-actions button {
+  width: auto;
+  min-height: 32px;
+  padding: 6px 12px;
+}
+
+.norm-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.norm-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  padding: 10px 12px;
+}
+
+.norm-stat span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.norm-stat strong {
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.norm-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 16px;
+  align-items: start;
+}
+
+.norm-doc-panel,
+.norm-side {
+  display: grid;
+  gap: 12px;
+}
+
+.norm-side {
+  /* 右侧栏固定 340px：显式单列 minmax(0,1fr) 兜底，
+     否则栏内任一子元素的 min-content 都会把整列撑宽，导致所有卡片溢出边框 */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.norm-side > section {
+  min-width: 0;
+}
+
+.norm-doc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.norm-doc-head-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.norm-doc-head h2 {
+  margin: 0;
+}
+
+.norm-doc-body {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.norm-doc-nav {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  border-right: 1px solid var(--line);
+  padding-right: 12px;
+}
+
+/* 主题里有 `body[data-theme="miro"] button` 这类宽泛规则，特异性高于单个类选择器，
+   会把分类导航刷成实心蓝按钮，所以这里必须补一份带 body[data-theme] 的变体。 */
+.norm-nav-item,
+body[data-theme] .norm-nav-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--ink);
+  padding: 6px 8px;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.norm-nav-item:hover,
+body[data-theme] .norm-nav-item:hover {
+  border-color: var(--line);
+  background: var(--panel-soft);
+  box-shadow: none;
+  transform: none;
+}
+
+.norm-nav-item.is-active,
+body[data-theme] .norm-nav-item.is-active {
+  border-color: var(--line);
+  background: var(--panel-soft);
+  box-shadow: inset 2px 0 0 var(--blue);
+  color: var(--blue);
+}
+
+.norm-nav-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.norm-nav-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.norm-nav-item.is-active .norm-nav-count {
+  border-color: var(--blue);
+  background: transparent;
+  color: var(--blue);
+}
+
+.norm-doc-nav .empty-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 窄屏时左侧导航会把正文挤到 300px 以内，改为顶部横向条 */
+@media (max-width: 1360px) {
+  .norm-doc-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .norm-doc-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: none;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    padding: 0 0 12px;
+  }
+
+  .norm-nav-item,
+  body[data-theme] .norm-nav-item {
+    width: auto;
+  }
+}
+
+.norm-doc-hint,
+.norm-doc .empty-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.norm-doc {
+  display: grid;
+  gap: 18px;
+}
+
+.norm-chapter {
+  display: grid;
+  gap: 8px;
+}
+
+.norm-chapter h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+  font-size: 15px;
+}
+
+.norm-chapter-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.norm-article {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  padding: 10px 12px;
+}
+
+.norm-article h4 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.norm-article-no {
+  flex: 0 0 auto;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.norm-article-body {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.norm-article-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.hint-line {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.norm-side section {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.norm-side section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.norm-side h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.norm-category-list {
+  display: grid;
+  gap: 8px;
+}
+
+.norm-category-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  padding: 8px 10px;
+}
+
+.norm-category-item.is-off {
+  opacity: 0.6;
+}
+
+.norm-category-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.norm-category-main strong {
+  font-size: 13px;
+}
+
+.norm-category-main span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.norm-category-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.norm-category-actions button {
+  width: auto;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+@media (min-width: 1101px) {
+  /* 宽屏下右侧栏只有 340px，栏内表单改为单列堆叠：
+     .form-row.slim 的两列最小宽度（180 + 130 + 按钮）会超出栏宽把卡片撑破。
+     1100px 以下 .norm-layout 已堆成一列，恢复原来的并排样式。 */
+  .norm-side .form-row,
+  .norm-side .form-row.slim {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.norm-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.norm-filter select,
+.norm-filter input:not([type="checkbox"]) {
+  width: auto;
+  min-width: 130px;
+}
+
+.norm-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.norm-checkbox input {
+  flex: 0 0 auto;
+  width: 16px;
+  min-width: 0;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--blue);
+}
+
+.norm-list {
+  margin-top: 8px;
+  overflow-x: auto;
+}
+
+.norm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.norm-table th,
+.norm-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.norm-table th {
+  background: #f8fafc;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.norm-table td strong {
+  display: block;
+  line-height: 1.6;
+}
+
+.norm-table td p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.norm-category-tag {
+  display: inline-block;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--blue);
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.norm-row-meta {
+  color: var(--subtle) !important;
+  font-size: 11px !important;
+}
+
+.norm-row-owner {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.norm-row-owner span {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+/* 注意：td 上不能直接挂 display:flex —— 会生成匿名 table-cell 包裹盒，
+   导致本格的下边框画在按钮底部、与同一行其它格的下边框错位。
+   flex 只能加在 td 内部的 div 上。 */
+.norm-actions-cell {
+  white-space: nowrap;
+}
+
+.norm-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.norm-row-actions button {
+  width: auto;
+  min-width: 54px;
+  min-height: 30px;
+  padding: 5px 10px;
+}
+
+.norm-row-locked {
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+.norm-state {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.norm-state-success {
+  background: #eaf7ef;
+  color: var(--green);
+}
+
+.norm-state-warn {
+  background: #fff4e5;
+  color: var(--orange);
+}
+
+.norm-state-muted {
+  background: #f1f2f6;
+  color: var(--muted);
+}
+
+@media (max-width: 1100px) {
+  .norm-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .norm-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }

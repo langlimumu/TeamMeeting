@@ -493,6 +493,8 @@ class RequestHandlerMixin:
             return "shifts"
         if path.startswith("/api/duty-rosters") or path.startswith("/api/dashboards/duty"):
             return "oncall"
+        if path.startswith("/api/norms") or path.startswith("/api/norm-categories"):
+            return "norms"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
         if path.startswith("/api/settings") or path.startswith("/api/sso/diagnose") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
@@ -830,6 +832,30 @@ class RequestHandlerMixin:
             return self.delete_duty_roster(int(parts[2]))
         if path == "/api/dashboards/duty" and method == "GET":
             return self.duty_dashboard(query)
+
+        if path == "/api/norm-categories":
+            if method == "GET":
+                return {"categories": self.list_norm_categories()}
+            if method == "POST":
+                return self.create_norm_category()
+        if len(parts) == 3 and parts[:2] == ["api", "norm-categories"]:
+            if method == "PATCH":
+                return self.update_norm_category(int(parts[2]))
+            if method == "DELETE":
+                return self.delete_norm_category(int(parts[2]))
+
+        if path == "/api/norms":
+            if method == "GET":
+                return {"norms": self.list_norms(query)}
+            if method == "POST":
+                return self.create_norm(user)
+        if path == "/api/norms/document" and method == "GET":
+            return self.norm_document()
+        if len(parts) == 3 and parts[:2] == ["api", "norms"]:
+            if method == "PATCH":
+                return self.update_norm(int(parts[2]), user)
+            if method == "DELETE":
+                return self.delete_norm(int(parts[2]), user)
 
         if path == "/api/thank-you":
             if method == "GET":

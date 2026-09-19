@@ -1,0 +1,72 @@
+# Frontend layout verification without browser automation
+
+No browser-automation dependency is installed in this repository, and installing one (Chromium ≈500 MB) is not worth it for a single visual check. Windows machines normally already have Chrome or Edge, which can render, measure, and screenshot a page headlessly.
+
+## Recipe
+
+1. Write a throwaway harness under the repository root that links the real stylesheet and copies the real markup for the panel under test. Do not hand-write a simplified version — the bugs live in the real mix of classes.
+
+```html
+<link rel="stylesheet" href="static/style.css" />
+...
+<pre id="report"></pre>
+<script>
+  function run() {
+    const box = document.querySelector(".norm-side");           // panel under test
+    const cs = getComputedStyle(box);
+    const r = box.getBoundingClientRect();
+    const innerRight = r.right - parseFloat(cs.paddingRight) - parseFloat(cs.borderRightWidth);
+    const bad = [];
+    box.querySelectorAll("*").forEach((el) => {
+      const er = el.getBoundingClientRect();
+      if (!er.width && !er.height) return;
+      const over = er.right - innerRight;
+      const selfOver = el.scrollWidth - el.clientWidth;
+      if (over > 0.5 || selfOver > 0.5) {
+        bad.push(`${el.tagName}.${el.className} rightOver=${over.toFixed(1)} selfOver=${selfOver}`);
+      }
+    });
+    document.body.innerHTML = `<pre>${bad.join("\n") || "CLEAN"}</pre>`;
+  }
+  window.addEventListener("load", () => setTimeout(run, 60));
+</script>
+```
+
+2. Dump the measured DOM at several viewport widths — this is the part that catches breakpoint bugs:
+
+```powershell
+$chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+foreach ($w in 1920,1440,1280,1101,1100,980,820,620) {
+  & $chrome --headless=new --disable-gpu --no-sandbox --virtual-time-budget=3500 `
+    --window-size="$w,1000" --user-data-dir="$dir\p$w" --dump-dom "file:///<repo>/_harness.html" 2>$null |
+    Out-File -Encoding utf8 "$dir\dom_$w.txt"
+}
+```
+
+3. To look at it instead of reading numbers, skip the body replacement (guard it with a `?keep=1` query check) and screenshot. `--screenshot` needs a plain path, not a `file://` URL, and the path must not contain characters Chrome rejects — use forward slashes:
+
+```powershell
+& $chrome --headless=new --disable-gpu --no-sandbox --hide-scrollbars --virtual-time-budget=4000 `
+  --window-size=1440,1300 --screenshot=D:/path/shot.png "file:///<repo>/_harness.html?keep=1"
+```
+
+4. Read the PNG with the Read tool to eyeball it, then delete every harness/`_*` artifact. Chrome profile directories (`--user-data-dir`) pile up fast; remove the whole scratch directory.
+
+## Known layout pitfalls in this codebase
+
+- **Never put `display: flex` (or `grid`) on a `<td>` / `<th>`.** The browser wraps it in an anonymous table-cell, so the real box is the inner flex box and `border-bottom` draws at the wrong height — the row's underline stops matching its neighbours. Wrap the flex container in a `<div>` inside the cell and style that (`.norm-actions-cell`, `.user-actions-cell`).
+- **A global `input, select, textarea` rule sets `width: 100%` and `min-height: 36px`.** Every checkbox needs its own container rule declaring `width`, `min-width`, `height` **and** `min-height` (with the `min-` variants spelled out, browsers disagree on which one wins). Descendant selectors must exclude checkboxes with `:not([type="checkbox"])`.
+- **Fixed-width grid columns overflow instead of shrinking.** `.norm-layout` uses `minmax(0, 1fr) 340px`, so the side panel has 306 px of content width. A child whose `min-content` exceeds that (`.form-row.slim` needs 180 + 130 + button ≈ 372 px) widens the *implicit* grid column of the panel, which drags every sibling section out past the border. Guard narrow columns with an explicit `grid-template-columns: minmax(0, 1fr)`, add `min-width: 0` to the direct children, and stack wide forms inside them with a `min-width` media query that matches the layout breakpoint.
+- **A bare element selector in a shared responsive rule leaks onto every other element with that tag.** The sidebar breakpoint rules under `@media (max-width: 1180px)` / `(max-width: 720px)` / `(max-width: 620px)` were written as `nav { … }` and `body[data-theme] nav { … }` while the intent was `.sidebar nav`. That was invisible while the sidebar nav was the only `<nav>` in the app; once the norms page added `<nav id="normDocNav">`, the document category nav silently inherited `grid-area: nav` — a **named grid line that does not exist**, so the browser synthesised phantom tracks and squeezed the document body to ~86 px at narrow widths. The tell is `getComputedStyle(el).gridColumnStart` returning `nav` instead of `auto`. All sidebar-intent `nav` rules are now scoped to `.sidebar nav`; keep them scoped, and prefer a class over a bare tag name in any rule shared across pages.
+- **A theme-scoped `button` rule repaints every new button-shaped component.** `body[data-theme="miro"] button` / `body[data-theme="dingtalk"] button` set `background: var(--blue); color: #fff; border: 1px solid var(--blue)` to make real action buttons look primary. Their specificity is `(0,1,2)` — attribute selector plus two element selectors — which **beats a single-class component rule** like `.norm-nav-item` `(0,1,0)`. So the six category-nav `<button>`s rendered as solid indigo pills in those themes. Note `body[data-theme] .topbar > .toolbar > button` and the other theme button rules are container-scoped and harmless; only the bare `button` ones leak. Two fixes are in the codebase: the morning navigator avoided `<button>` altogether and used `<div>` entries, while the norms nav keeps native button semantics and adds the house-style variant pair. Prefer the pair, it keeps keyboard and screen-reader behaviour:
+  ```css
+  .norm-nav-item,
+  body[data-theme] .norm-nav-item { … }        /* (0,2,1) > (0,1,2) */
+  .norm-nav-item:hover,
+  body[data-theme] .norm-nav-item:hover { … }  /* also needed: theme hover rules are (0,2,2) */
+  ```
+  Verify with `getComputedStyle` — `backgroundColor` should be `rgba(0, 0, 0, 0)` on an unselected entry. Keep a **control `<button>`** with no class in the harness: if it comes back `rgb(91, 118, 254)` (miro) or `rgb(22, 119, 255)` (dingtalk), the leak is live and the harness is measuring the right thing.
+- **A specificity bump is never local — it also outranks the component's own media-query overrides.** `.norm-nav-item { width: 100% }` was overridden at `≤1360px` by a later `.norm-nav-item { width: auto }`: same specificity, so source order decided it. The moment the base rule became `body[data-theme] .norm-nav-item` `(0,2,1)`, that `(0,1,0)` media override silently stopped applying and the narrow layout fell back to a full-width stacked list instead of the wrapping top bar. Fixing the leak therefore requires pairing **every** override of the affected selector, media queries included (`grep` the selector and check each hit). And run the probe at a **narrow** width as well — a wide-only check cannot see this class of regression. A screenshot is the cheapest way to catch it: the stacked-vs-wrapped difference is obvious to the eye and invisible in a `bodyWidth == docWidth` measurement.
+- **`file://` harnesses give you computed styles but not CSSOM rules.** `getComputedStyle` works fine from a file URL, so a paint/size probe needs no server. Dumping `document.styleSheets[i].cssRules` does **not**: it throws a `SecurityError` for a cross-origin sheet, so a file-URL harness cannot tell you which rule actually won. Serve the repo (`python -m http.server 8899 --bind 127.0.0.1`) and load `http://127.0.0.1:8899/_harness.html` whenever you need to dump matching rules. Two scratch habits that cost time if ignored: write probe output **inside the repo**, because this sandbox's `/tmp` does not survive between tool calls (a later parse step just sees "file missing"); and a `--user-data-dir` under the repo leaves a Chrome profile tree that floods `grep` — delete the whole directory when done.
+- **When dumping matching rules, detect a grouping rule by `rule.selectorText === undefined`, not by `rule.cssRules`.** Modern Chrome gives plain `CSSStyleRule` objects a `cssRules` list as well (for CSS nesting), so a recursive walk written as `if (rule.cssRules) { recurse } else { collect }` recurses into an empty list on every style rule and silently reports zero matches — which looks like "no rule applies" and sends you chasing the wrong theory.
+- Static assets are served with `no-store, no-cache, must-revalidate, max-age=0`, so plain reloads are enough; Ctrl+F5 is not required.

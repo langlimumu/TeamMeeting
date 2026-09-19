@@ -74,6 +74,8 @@ Use these references conditionally:
 - Keep public-domain traffic behind a loopback Nginx upstream. Trust forwarded IP/protocol only when `TEAM_LOOP_TRUST_PROXY=1` and the direct peer is loopback; production must use `TEAM_LOOP_REQUIRE_HTTPS=1`, reject direct HTTP login and mutations, and issue Secure cookies for HTTPS proxy requests.
 - Keep workbench and morning-meeting data synchronized.
 - Keep the morning navigator visually neutral across themes: theme-wide button rules must not turn every member entry into a primary action, and only the selected member should receive the accent treatment.
+- Apply that same rule to every new button-shaped component: the `data-theme` blocks style bare `button`, and their specificity beats a single class, so pair the component rule with `body[data-theme] <component>` (plus the `:hover` variant) rather than relying on one class.
+- Number norm clauses inside their own document (`1`, `2`, `3`), never with a category prefix. A category's ordinal comes from `sort_order`, which an administrator can change, so prefixing would renumber every document the moment categories are reordered. Cross-document references name the document instead, e.g. 「见《研发流程规范》第 2 条」.
 - Keep process instances as immutable snapshots of template nodes and parent relations at creation time. Templates are forests: empty parents are parallel roots, siblings are branches, parents must precede children, and required nodes cannot depend on optional nodes. Treat the mind-map editor as a projection of ordered parent keys rather than persisting coordinates. Lock children until the parent is complete and recursively reset descendants when a parent is unchecked. Parent templates inherit downward read-only; every signed-in user with process view access may create a current-team template, creators manage their own templates, administrators manage all current-team templates, and required nodes drive automatic completion.
 - Keep shared date filters initialized to the current month without page-specific overrides.
 - Preserve the selected shift range across post-submit calendar refreshes; selecting a new calendar day may reset both range endpoints.
@@ -106,7 +108,7 @@ node --check static\app.js
 git diff --check
 ```
 
-Then test the affected API and UI states. For frontend work, inspect desktop and narrow layouts, long text, empty data, repeated clicks, error feedback, and role-restricted controls.
+Then test the affected API and UI states. For frontend work, inspect desktop and narrow layouts, long text, empty data, repeated clicks, error feedback, and role-restricted controls. Measure overflow with the headless-Chrome harness in `references/frontend-layout-check.md` instead of installing browser automation; that file also lists the recurring layout pitfalls (flex on `td`, checkbox sizing, fixed-width columns overflowing, bare `nav` selectors leaking into other `<nav>` elements, theme-wide `button` rules repainting a component's own buttons).
 
 For database or deployment changes, deploy Gray and test against its isolated snapshot before production promotion:
 

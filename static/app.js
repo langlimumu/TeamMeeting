@@ -74,6 +74,15 @@ const state = {
   dutyRosters: [],
   dutyUsers: [],
   dutyToday: [],
+  normCategories: [],
+  norms: [],
+  normDocument: null,
+  normActiveCategory: "",
+  normCategoryFilter: "",
+  normKeyword: "",
+  normIncludeAbolished: false,
+  editingNormId: null,
+  editingNormCategoryId: null,
   activeShiftPopoverDate: null,
   personalMorningMonthItems: [],
   activePersonalMorningChain: null,
@@ -110,6 +119,7 @@ const pages = [
   ["meetings", "▦", "会议沙盘", "按会议沉淀议题、参会签到和行动项。"],
   ["shifts", "◷", "机台排班", "用月历查看白班/夜班，并统计周期工时。"],
   ["oncall", "⌖", "问题定位排班", "按日历安排问题定位值班，页首显示当日值班名单。"],
+  ["norms", "§", "团队规范", "成员随手记规则标准，系统自动装配成统一规范文档。"],
   ["rules", "★", "红黑榜", "发布规则、记录积分，并按时间查看排行。"],
   ["thanks", "♥", "Thank You", "每周感谢帮助过自己的团队成员。"],
   ["links", "↗", "常用链接", "归档团队常用系统、文档和工具入口。"],
@@ -749,6 +759,7 @@ function applyAuthView() {
   $("#thankForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("thanks", "create"));
   $("#linkForm")?.closest(".panel")?.classList.toggle("hidden", guest || !canOperate("links", "create"));
   $("#openMeetingCreateBtn")?.classList.toggle("hidden", guest || !canOperate("meetings", "create"));
+  $("#normCreatePanel")?.classList.toggle("hidden", guest || !canOperate("norms", "create"));
   const cannotJoinMorning = !isAdminView() && state.user?.eligible_morning !== undefined && !Boolean(state.user.eligible_morning);
   $("#morningCreatePanel")?.classList.toggle("hidden", guest || cannotJoinMorning || !canOperate("morning", "create"));
   $("#personalMorningCreateForm")?.classList.toggle("hidden", guest || cannotJoinMorning || !canOperate("morning", "create"));
@@ -2593,9 +2604,11 @@ function renderUserTable(users) {
       <td><div class="user-scope-mini">${[
         ["members", "成员"], ["morning", "早会"], ["rules", "榜单"], ["thanks", "感谢"],
       ].map(([scope, label]) => `<span class="${Boolean(user[`eligible_${scope}`]) ? "on" : "off"}">${label}</span>`).join("")}</div></td>
-      <td class="user-row-actions">
-        <button class="secondary user-account-edit-btn" type="button" data-user-id="${user.id}">编辑</button>
-        ${user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : `<span class="pill">当前账号</span>`}
+      <td class="user-actions-cell">
+        <div class="user-row-actions">
+          <button class="secondary user-account-edit-btn" type="button" data-user-id="${user.id}">编辑</button>
+          ${user.id !== state.user?.id ? `<button class="danger user-delete-btn" data-user-id="${user.id}" data-user-name="${escapeHtml(user.display_name)}">删除</button>` : `<span class="pill">当前账号</span>`}
+        </div>
       </td>
     </tr>`).join("")}</tbody></table></div>`;
 }
@@ -5315,6 +5328,381 @@ function moveDutyMonth(delta) {
   loadOncall().catch((error) => toast(error.message));
 }
 
+const normStateMeta = {
+  active: { label: "生效中", tone: "success" },
+  scheduled: { label: "待生效", tone: "warn" },
+  expired: { label: "已过期", tone: "warn" },
+  pending: { label: "待确认", tone: "warn" },
+  abolished: { label: "已废止", tone: "muted" },
+};
+
+function normStateBadge(norm) {
+  const meta = normStateMeta[norm.state] || normStateMeta.active;
+  return `<span class="norm-state norm-state-${meta.tone}">${escapeHtml(meta.label)}</span>`;
+}
+
+function normCategoryName(norm) {
+  return norm.category_name || "未分类";
+}
+
+function canEditNorm(norm) {
+  if (!state.user) return false;
+  if (isAdminView()) return true;
+  return Number(norm.created_by) === Number(state.user.id) && canOperate("norms", "edit");
+}
+
+function normRowMeta(norm) {
+  const parts = [];
+  if (norm.scope) parts.push(`适用：${norm.scope}`);
+  if (norm.source) parts.push(`来源：${norm.source}`);
+  if (norm.effective_from) parts.push(`生效：${norm.effective_from}`);
+  if (norm.effective_to) parts.push(`失效：${norm.effective_to}`);
+  if (norm.updated_at && norm.updated_at !== norm.created_at) parts.push(`更新：${shortDate(norm.updated_at)}`);
+  return parts.join(" · ") || "未填写补充信息";
+}
+
+function normArticleMeta(article) {
+  const parts = [];
+  if (article.scope) parts.push(`适用范围：${escapeHtml(article.scope)}`);
+  if (article.source) parts.push(`来源：${escapeHtml(article.source)}`);
+  if (article.effective_from) parts.push(`生效：${escapeHtml(article.effective_from)}`);
+  if (article.created_by_name) parts.push(`记录人：${escapeHtml(article.created_by_name)}`);
+  return parts.join(" · ");
+}
+
+function renderNormCategoryOptions() {
+  const categories = state.normCategories || [];
+  const selectable = categories.filter((category) => category.active !== 0 || isAdminView());
+  const options = selectable
+    .map((category) => `<option value="${category.id}">${escapeHtml(category.name)}</option>`)
+    .join("");
+  $$("[data-norm-categories]").forEach((select) => {
+    const previous = select.value;
+    select.innerHTML = options;
+    if (previous && [...select.options].some((option) => option.value === previous)) select.value = previous;
+  });
+  const filter = $("#normCategoryFilter");
+  if (filter) {
+    filter.innerHTML = `<option value="">全部分类</option>${categories
+      .map((category) => `<option value="${category.id}">${escapeHtml(category.name)}（${Number(category.norm_count || 0)}）</option>`)
+      .join("")}`;
+    filter.value = state.normCategoryFilter || "";
+  }
+}
+
+function renderNormFormMode() {
+  const editing = Boolean(state.editingNormId);
+  const title = $("#normFormTitle");
+  const submit = $("#normSubmitBtn");
+  const cancel = $("#normCancelEditBtn");
+  const statusSelect = $("#normStatusSelect");
+  if (statusSelect) {
+    const options = [["active", "生效中"]];
+    if (isAdminView()) options.push(["pending", "待确认（管理员复核用）"]);
+    options.push(["abolished", "已废止"]);
+    const previous = statusSelect.value;
+    statusSelect.innerHTML = options.map(([value, label]) => `<option value="${value}">${label}</option>`).join("");
+    statusSelect.value = options.some(([value]) => value === previous) ? previous : "active";
+  }
+  if (title) title.textContent = editing ? "修改这条规范" : "随手记一条规范";
+  if (submit) submit.textContent = editing ? "保存修改" : "记入规范";
+  if (cancel) cancel.classList.toggle("hidden", !editing);
+  const hidden = $('input[name="norm_id"]');
+  if (hidden && !editing) hidden.value = "";
+}
+
+function normDocuments() {
+  return (state.normDocument || {}).documents || [];
+}
+
+function normDocKey(document) {
+  if (!document) return "";
+  const id = document.category_id;
+  return id === null || id === undefined ? "uncategorized" : String(id);
+}
+
+function activeNormDocument() {
+  const documents = normDocuments();
+  if (!documents.length) return null;
+  return documents.find((item) => normDocKey(item) === state.normActiveCategory) || documents[0];
+}
+
+function selectNormCategory(key) {
+  state.normActiveCategory = key || "";
+  const active = activeNormDocument();
+  state.normCategoryFilter = active && active.category_id !== null && active.category_id !== undefined
+    ? String(active.category_id)
+    : "";
+  const filter = $("#normCategoryFilter");
+  if (filter) filter.value = state.normCategoryFilter;
+  renderNormNav();
+  renderNormStats();
+  renderNormDocument();
+  renderNormList();
+}
+
+function renderNormNav() {
+  const target = $("#normDocNav");
+  if (!target) return;
+  const documents = normDocuments();
+  if (!documents.length) {
+    target.innerHTML = `<p class="empty-note">还没有规范分类。</p>`;
+    return;
+  }
+  const active = activeNormDocument();
+  target.innerHTML = documents
+    .map((item) => {
+      const count = Number(item.article_count || 0);
+      return `
+      <button class="norm-nav-item ${item === active ? "is-active" : ""}" type="button" data-norm-doc="${escapeHtml(normDocKey(item))}">
+        <span class="norm-nav-name">${escapeHtml(item.name)}</span>
+        ${count ? `<span class="norm-nav-count">${count}</span>` : ""}
+      </button>`;
+    })
+    .join("");
+}
+
+function renderNormStats() {
+  const target = $("#normStats");
+  if (!target) return;
+  const doc = state.normDocument || {};
+  const stats = doc.stats || {};
+  const documents = normDocuments();
+  const active = activeNormDocument();
+  const articleTotal = documents.reduce((sum, item) => sum + Number(item.article_count || 0), 0);
+  const cells = [
+    ["分类文档", `${documents.length} 份`],
+    ["生效条款", `${articleTotal} 条`],
+    ["待确认", `${Number(stats.pending || 0)} 条`],
+    ["已废止", `${Number(stats.abolished || 0)} 条`],
+  ];
+  target.innerHTML = cells
+    .map(([label, value]) => `<div class="norm-stat"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`)
+    .join("");
+  const title = $("#normDocTitle");
+  if (title) title.textContent = doc.title || "团队规范";
+  const meta = $("#normDocMeta");
+  if (meta) {
+    meta.textContent = documents.length
+      ? `按分类分成 ${documents.length} 份文档，成员随手记的规则标准会立即编入对应分类。`
+      : "还没有规范分类，先在右侧新增一个分类，再随手记规则标准。";
+  }
+  const download = $("#normDownloadBtn");
+  if (download) {
+    const enabled = Boolean(active && Number(active.article_count || 0));
+    download.disabled = !enabled;
+    download.title = enabled ? `下载「${active.title}」` : "当前分类还没有生效条款";
+  }
+  const heading = $("#normDocHeading");
+  if (heading) heading.textContent = active ? active.title : "规范文档";
+  const hint = $("#normDocHint");
+  if (hint) {
+    hint.textContent = active && active.description
+      ? active.description
+      : "条款号由系统自动生成，每份文档内从 1 开始、按记录顺序排列。";
+  }
+}
+
+function renderNormDocument() {
+  const target = $("#normDoc");
+  if (!target) return;
+  const doc = activeNormDocument();
+  if (!doc) {
+    target.innerHTML = `<p class="empty-note">还没有规范分类，先在右侧新增一个分类。</p>`;
+    return;
+  }
+  const chapter = (doc.chapters || [])[0] || { articles: [] };
+  const articles = chapter.articles || [];
+  if (!articles.length) {
+    target.innerHTML = `<p class="empty-note">「${escapeHtml(doc.name)}」下还没有生效中的规范条款，先在右侧随手记一条。</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <section class="norm-chapter">
+      <h3>${escapeHtml(chapter.name)}</h3>
+      ${chapter.description ? `<p class="norm-chapter-desc">${escapeHtml(chapter.description)}</p>` : ""}
+      ${articles.map((article) => `
+        <article class="norm-article" id="norm-article-${article.id}" data-norm-title="${escapeHtml(article.title)}">
+          <h4><span class="norm-article-no">${escapeHtml(article.no)}</span>${escapeHtml(article.title)}</h4>
+          ${article.content ? `<p class="norm-article-body">${escapeHtml(article.content).replace(/\n/g, "<br />")}</p>` : ""}
+          ${normArticleMeta(article) ? `<p class="norm-article-meta">${normArticleMeta(article)}</p>` : ""}
+        </article>`).join("")}
+    </section>`;
+}
+
+function filteredNorms() {
+  const keyword = state.normKeyword.trim().toLowerCase();
+  return (state.norms || []).filter((norm) => {
+    if (state.normCategoryFilter && String(norm.category_id || "") !== state.normCategoryFilter) return false;
+    if (!keyword) return true;
+    return [norm.title, norm.content, norm.scope, norm.source, norm.category_name, norm.created_by_name]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .includes(keyword);
+  });
+}
+
+function renderNormList() {
+  const target = $("#normList");
+  if (!target) return;
+  const items = filteredNorms();
+  if (!items.length) {
+    target.innerHTML = `<p class="empty-note">${(state.norms || []).length ? "没有匹配的规范条目。" : "还没有规范条目，先在右侧随手记一条。"}</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <table class="norm-table">
+      <thead><tr><th>分类</th><th>规范内容</th><th>状态</th><th>记录</th><th>操作</th></tr></thead>
+      <tbody>
+        ${items.map((norm) => `
+          <tr>
+            <td><span class="norm-category-tag">${escapeHtml(normCategoryName(norm))}</span></td>
+            <td>
+              <strong>${escapeHtml(norm.title)}</strong>
+              ${norm.content ? `<p>${escapeHtml(norm.content)}</p>` : ""}
+              <p class="norm-row-meta">${escapeHtml(normRowMeta(norm))}</p>
+            </td>
+            <td>${normStateBadge(norm)}</td>
+            <td class="norm-row-owner">${escapeHtml(norm.created_by_name || "")}<span>${escapeHtml(shortDate(norm.created_at))}</span></td>
+            <td class="norm-actions-cell">
+              <div class="norm-row-actions">
+                ${canEditNorm(norm) ? `<button class="secondary norm-edit-btn" type="button" data-norm-id="${norm.id}">编辑</button>` : ""}
+                ${canOperate("norms", "delete") ? `<button class="danger norm-delete-btn" type="button" data-norm-id="${norm.id}" data-norm-title="${escapeHtml(norm.title)}">删除</button>` : ""}
+                ${!canEditNorm(norm) && !canOperate("norms", "delete") ? `<span class="norm-row-locked">仅可查看</span>` : ""}
+              </div>
+            </td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+function renderNormCategoryList() {
+  const target = $("#normCategoryList");
+  if (!target) return;
+  const categories = state.normCategories || [];
+  if (!categories.length) {
+    target.innerHTML = `<p class="empty-note">还没有分类。</p>`;
+    return;
+  }
+  target.innerHTML = categories
+    .map((category) => `
+      <div class="norm-category-item ${category.active === 0 ? "is-off" : ""}">
+        <div class="norm-category-main">
+          <strong>${escapeHtml(category.name)}</strong>
+          <span>${Number(category.norm_count || 0)} 条${category.active === 0 ? " · 已停用" : ""}</span>
+        </div>
+        <div class="norm-category-actions">
+          <button class="secondary norm-category-edit-btn" type="button" data-category-id="${category.id}">重命名</button>
+          <button class="secondary norm-category-toggle-btn" type="button" data-category-id="${category.id}" data-category-active="${category.active === 0 ? 1 : 0}">${category.active === 0 ? "启用" : "停用"}</button>
+          <button class="danger norm-category-delete-btn" type="button" data-category-id="${category.id}" data-category-name="${escapeHtml(category.name)}">删除</button>
+        </div>
+      </div>`)
+    .join("");
+}
+
+async function loadNorms() {
+  const includeAbolished = state.normIncludeAbolished ? "1" : "0";
+  const [categoryData, normData, documentData] = await Promise.all([
+    api("/api/norm-categories"),
+    api(`/api/norms?include_abolished=${includeAbolished}`),
+    api("/api/norms/document"),
+  ]);
+  state.normCategories = categoryData.categories || [];
+  state.norms = normData.norms || [];
+  state.normDocument = documentData.document || null;
+  const documents = normDocuments();
+  if (!documents.some((item) => normDocKey(item) === state.normActiveCategory)) {
+    state.normActiveCategory = documents.length ? normDocKey(documents[0]) : "";
+  }
+  renderNormCategoryOptions();
+  renderNormFormMode();
+  syncNormCategoryFormMode();
+  renderNormNav();
+  renderNormDocument();
+  renderNormList();
+  renderNormCategoryList();
+  renderNormStats();
+}
+
+function enterNormEdit(norm) {
+  const form = $("#normForm");
+  if (!form) return;
+  state.editingNormId = norm.id;
+  form.elements.norm_id.value = String(norm.id);
+  form.elements.category_id.value = String(norm.category_id || "");
+  form.elements.title.value = norm.title || "";
+  form.elements.content.value = norm.content || "";
+  form.elements.scope.value = norm.scope || "";
+  form.elements.source.value = norm.source || "";
+  form.elements.effective_from.value = norm.effective_from || "";
+  form.elements.effective_to.value = norm.effective_to || "";
+  renderNormFormMode();
+  const statusSelect = $("#normStatusSelect");
+  if (statusSelect) statusSelect.value = norm.status || "active";
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function exitNormEdit() {
+  state.editingNormId = null;
+  $("#normForm")?.reset();
+  renderNormFormMode();
+}
+
+function syncNormCategoryFormMode() {
+  const editing = Boolean(state.editingNormCategoryId);
+  const title = $("#normCategoryFormTitle");
+  if (title) title.textContent = editing ? "修改规范分类" : "规范分类";
+  const submit = $("#normCategorySubmitBtn");
+  if (submit) submit.textContent = editing ? "保存分类" : "新增分类";
+  const cancel = $("#normCategoryCancelBtn");
+  if (cancel) cancel.classList.toggle("hidden", !editing);
+}
+
+function enterNormCategoryEdit(category) {
+  const form = $("#normCategoryForm");
+  if (!form) return;
+  state.editingNormCategoryId = category.id;
+  form.elements.category_id.value = String(category.id);
+  form.elements.name.value = category.name || "";
+  form.elements.description.value = category.description || "";
+  syncNormCategoryFormMode();
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function exitNormCategoryEdit() {
+  state.editingNormCategoryId = null;
+  $("#normCategoryForm")?.reset();
+  syncNormCategoryFormMode();
+}
+
+function downloadTextFile(filename, text) {
+  const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function normFileLabel(item) {
+  const prefix = (state.normDocument || {}).title || "团队规范";
+  return `${prefix}-${item.name || item.title || "规范"}-${iso(new Date())}.md`.replace(/[\\/:*?"<>|\s]+/g, "");
+}
+
+function downloadNormDocument() {
+  const doc = activeNormDocument();
+  if (!doc || !doc.markdown) {
+    toast("文档还没有生成，请稍后重试");
+    return;
+  }
+  downloadTextFile(normFileLabel(doc), doc.markdown);
+  toast(`已下载「${doc.name}」`);
+}
+
 function renderThankPeriodControls() {
   const target = $("#thankPeriodControls");
   if (!target) return;
@@ -5416,6 +5804,7 @@ async function refreshPageData(id = state.currentPage) {
     meetings: loadMeetings,
     shifts: loadShifts,
     oncall: loadOncall,
+    norms: loadNorms,
     rules: loadRulesAndScores,
     thanks: loadThanks,
     links: loadLinks,
@@ -5438,6 +5827,7 @@ async function refreshAll() {
   if (canLoadModule("links")) loaders.push(loadLinks);
   if (canLoadModule("shifts")) loaders.push(loadShifts);
   if (canLoadModule("oncall")) loaders.push(loadOncall);
+  if (canLoadModule("norms")) loaders.push(loadNorms);
   if (canLoadModule("thanks")) loaders.push(loadThanks);
   if (canLoadModule("archive")) loaders.push(loadArchive);
   if (!isGuest() && canLoadModule("dashboard")) loaders.push(loadDashboard);
@@ -6845,6 +7235,69 @@ function bindEvents() {
     return api("/api/duty-rosters", { method: "POST", body: JSON.stringify(data) });
   });
   bindForm("#thankForm", (_, form) => api("/api/thank-you", { method: "POST", body: JSON.stringify(thankFormPayload(form)) }));
+  bindForm("#normForm", (data) => {
+    const normId = String(data.norm_id || "").trim();
+    const payload = {
+      category_id: data.category_id,
+      title: data.title,
+      content: data.content || "",
+      scope: data.scope || "",
+      source: data.source || "",
+      effective_from: data.effective_from || "",
+      effective_to: data.effective_to || "",
+      status: normId ? (data.status || "active") : "active",
+    };
+    const request = normId
+      ? api(`/api/norms/${normId}`, { method: "PATCH", body: JSON.stringify(payload) })
+      : api("/api/norms", { method: "POST", body: JSON.stringify(payload) });
+    return request.then((result) => {
+      state.editingNormId = null;
+      return result;
+    });
+  });
+  bindForm("#normCategoryForm", (data) => {
+    const categoryId = String(data.category_id || "").trim();
+    const payload = { name: data.name, description: data.description || "", active: 1 };
+    const request = categoryId
+      ? api(`/api/norm-categories/${categoryId}`, { method: "PATCH", body: JSON.stringify(payload) })
+      : api("/api/norm-categories", { method: "POST", body: JSON.stringify(payload) });
+    return request.then((result) => {
+      state.editingNormCategoryId = null;
+      return result;
+    });
+  });
+  $("#normDocNav")?.addEventListener("click", (event) => {
+    const item = event.target.closest("[data-norm-doc]");
+    if (item) selectNormCategory(item.dataset.normDoc);
+  });
+  $("#normDownloadBtn")?.addEventListener("click", () => downloadNormDocument());
+  $("#normScrollTopBtn")?.addEventListener("click", () => {
+    $("#normDoc")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  $("#normCancelEditBtn")?.addEventListener("click", () => exitNormEdit());
+  $("#normCategoryCancelBtn")?.addEventListener("click", () => exitNormCategoryEdit());
+  $("#normSearchInput")?.addEventListener("input", (event) => {
+    state.normKeyword = event.target.value || "";
+    renderNormList();
+  });
+  $("#normCategoryFilter")?.addEventListener("change", (event) => {
+    const value = event.target.value || "";
+    state.normCategoryFilter = value;
+    const matched = value
+      ? normDocuments().find((item) => item.category_id !== null && item.category_id !== undefined && String(item.category_id) === value)
+      : null;
+    if (matched) {
+      state.normActiveCategory = normDocKey(matched);
+      renderNormNav();
+      renderNormDocument();
+      renderNormStats();
+    }
+    renderNormList();
+  });
+  $("#normIncludeAbolished")?.addEventListener("change", (event) => {
+    state.normIncludeAbolished = Boolean(event.target.checked);
+    loadNorms().catch((error) => toast(error.message));
+  });
   $("#teamChatForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -7987,6 +8440,62 @@ function bindEvents() {
     const dutyCell = event.target.closest(".duty-day");
     if (dutyCell) {
       selectDutyDay(dutyCell);
+      return;
+    }
+    const normEdit = event.target.closest(".norm-edit-btn");
+    if (normEdit) {
+      event.stopPropagation();
+      const norm = state.norms.find((item) => Number(item.id) === Number(normEdit.dataset.normId));
+      if (norm) enterNormEdit(norm);
+      return;
+    }
+    const normDelete = event.target.closest(".norm-delete-btn");
+    if (normDelete) {
+      event.stopPropagation();
+      if (!window.confirm(`确定删除规范「${normDelete.dataset.normTitle || ""}」吗？删除后可在系统管理的回收站恢复。`)) return;
+      api(`/api/norms/${normDelete.dataset.normId}`, { method: "DELETE" })
+        .then(loadNorms)
+        .then(() => toast("规范已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const normCategoryEdit = event.target.closest(".norm-category-edit-btn");
+    if (normCategoryEdit) {
+      event.stopPropagation();
+      const category = state.normCategories.find((item) => Number(item.id) === Number(normCategoryEdit.dataset.categoryId));
+      if (category) enterNormCategoryEdit(category);
+      return;
+    }
+    const normCategoryToggle = event.target.closest(".norm-category-toggle-btn");
+    if (normCategoryToggle) {
+      event.stopPropagation();
+      const active = Number(normCategoryToggle.dataset.categoryActive || 1);
+      api(`/api/norm-categories/${normCategoryToggle.dataset.categoryId}`, { method: "PATCH", body: JSON.stringify({ active }) })
+        .then(loadNorms)
+        .then(() => toast(active ? "分类已启用" : "分类已停用"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const normCategoryDelete = event.target.closest(".norm-category-delete-btn");
+    if (normCategoryDelete) {
+      event.stopPropagation();
+      if (!window.confirm(`确定删除分类「${normCategoryDelete.dataset.categoryName || ""}」吗？`)) return;
+      api(`/api/norm-categories/${normCategoryDelete.dataset.categoryId}`, { method: "DELETE" })
+        .then(loadNorms)
+        .then(() => toast("分类已删除"))
+        .catch((error) => toast(error.message));
+      return;
+    }
+    const normArticle = event.target.closest(".norm-article");
+    if (normArticle) {
+      const keyword = normArticle.dataset.normTitle || "";
+      if (keyword) {
+        state.normKeyword = keyword;
+        const search = $("#normSearchInput");
+        if (search) search.value = keyword;
+        renderNormList();
+        $("#normList")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
       return;
     }
   });

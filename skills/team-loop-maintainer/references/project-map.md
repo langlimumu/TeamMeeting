@@ -8,7 +8,7 @@
 | HTTP and API routing | `team_loop/handlers/request.py` | composed `team_loop/handler.py` |
 | Authentication, users and organizations | `team_loop/handlers/accounts.py` | SSO/database helpers, system settings |
 | Collaboration domains | `team_loop/handlers/collaboration.py` | moments, forum, morning and processes |
-| Operational domains | `team_loop/handlers/operations.py` | scores, meetings, links, shifts and thanks |
+| Operational domains | `team_loop/handlers/operations.py` | scores, meetings, links, shifts, duty rosters, norms and thanks |
 | System operations | `team_loop/handlers/system.py` | recycle, archive, backups, settings and audit |
 | Permissions | `team_loop/config.py`, `team_loop/permissions.py` | `static/app.js` access helpers and navigation |
 | Team moments | `team_moments`, `team_moment_images`, protected image endpoint | `#moments`, card/timeline renderer and edit modal |
@@ -46,6 +46,7 @@
 - Link edits and deletes are available to users whose type grants the matching operation, with soft deletion and audit history.
 - OAuth2 manual configuration groups the authorization, access-token and UserInfo endpoints with Client ID and callback guidance. Client Secret is write-only in the UI and may be supplied with `TEAM_LOOP_SSO_CLIENT_SECRET`; public settings expose only readiness, auto-login state and button text. Employee ID is the user-management link, external subject is the stable provider identity, and the deepest matching SSO group selects the organization route.
 - Gray uses a production snapshot and never writes its test data back to production.
+- Team norms are crowd-recorded and organization-scoped, and each category owns its **own document** instead of being a chapter of one big file: `GET /api/norms/document` returns a `documents` array with one entry per category (`category_id`, `name`, `title`, `article_count`, a single-element `chapters`, and its own `markdown`). Article numbers are **per document** (`1`, `2`, `3`, restarting in every document) with no category prefix, because a category's ordinal comes from `sort_order` and prefixing would renumber every document whenever categories are reordered; cross-document references name the document, e.g. 「见《研发流程规范》第 2 条」. Only `active` and unexpired norms enter a document; empty categories keep an empty document so the navigation mirrors the shelves and a freshly created category never disappears. There is deliberately **no versioning** — a document is a live projection of `norms`, so recording or editing renumbers it immediately. `norm_doc_versions` is still created but nothing reads or writes it: do not reintroduce a publish/preview flow without also reintroducing a frozen release view, because rendering live content under a version label was the original bug. Category deletion or deactivation is blocked while entries remain, and a norm may be edited by its author plus administrators.
 
 ## High-risk areas
 
@@ -58,3 +59,5 @@
 - SQLite files cannot be replaced while another Windows process holds them open.
 - Theme-specific CSS appears after base CSS and can override new styles.
 - Development hot reload on port 8000 may point at the main database; use Gray for destructive tests.
+- A live instance only picks up part of an edit: `static/*` is re-read from disk on every request, but Python modules are imported once at process start, so a page can show a **new frontend with an old backend** (e.g. neutral navigation without sequence numbers, yet article numbers still coming from the stale `no`). Edits under `team_loop/` require restarting the process; "the fix is not visible" almost always means a process started before the edit, not a broken change.
+- Before trusting a screenshot or reporting a bug, identify which release actually serves the port: `data/deploy/runtime/production.json` records `release`, `release_path`, `database`, `pid` and `started_at`, and the pid must match the process listening on that port. A `data/deploy/releases/<stamp>` snapshot is frozen at deploy time and can be days behind the working tree, and a deployment directory (`companytest/TeamMeeting-main`) carries its own `data/deploy` tree — a listener on `0.0.0.0:8000` may belong to a completely different copy of the project than the one being edited.
