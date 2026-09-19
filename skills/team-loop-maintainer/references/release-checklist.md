@@ -55,9 +55,11 @@
 
 - Review `git diff --stat` and the full relevant diff.
 - Update user, developer, API, database, or deployment docs as required.
-- Stage explicit intended paths.
+- Read `git status --short` for stray files before staging. A 0-byte file named `python` once appeared at the repository root from a mistyped command, and `git add -A` would have committed it — always stage explicit intended paths.
+- Fix `git diff --check` findings. `new blank line at EOF` is a real signal here: every module under `team_loop/` ends with **two** trailing blank lines, so restore that exact count (`data.rstrip(b"\r\n") + b"\r\n\r\n\r\n"`) instead of collapsing to a single newline, and leave files that already had a different count untouched to avoid churn. The working tree is CRLF — do not write mixed line endings.
 - Commit only after checks pass.
 - Push only when the user explicitly requests it.
+- After pushing, confirm `git status --short --branch` is clean and `git rev-list --left-right --count origin/main...main` prints `0	0`.
 
 ## Before production promotion
 
