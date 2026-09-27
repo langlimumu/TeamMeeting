@@ -234,22 +234,63 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/norm-categories` | 规范分类 |
-| PATCH/DELETE | `/api/norm-categories/{id}` | 改名、排序、停用或删除分类 |
-| GET/POST | `/api/norms` | 规范条目；查询支持 `category_id`、`q`、`include_abolished` |
+| GET/POST | `/api/norm-categories` | 规范分类（目录）；POST 可带 `parent_id` 建子目录 |
+| PATCH/DELETE | `/api/norm-categories/{id}` | 改名、改上级、停用（仅管理员）或删除（创建人或管理员）分类 |
+| GET/POST | `/api/norms` | 规范条目；查询支持 `category_id`、`q`、`include_abolished`。规范页读取已改走 `/api/norms/document`，这个接口保留给其它调用方与增删改的返回值 |
 | PATCH/DELETE | `/api/norms/{id}` | 修改或软删除条目 |
 | GET | `/api/norms/document` | 全部分类文档：每个分类一份，各自带 Markdown |
+| POST | `/api/norm-images` | 上传正文插图（JSON + base64 data URL），只暂存、不绑定 |
+| GET | `/api/norm-images/{id}` | 取插图二进制；**不走静态目录**，见下 |
+
+**两级目录**：分类最多两级。`parent_id` 为空/`0` 表示一级目录，否则是该目录的上级。
+
+- `GET /api/norm-categories` 返回平铺数组，按「一级目录 → 它的子目录 → 下一个一级目录」的顺序排列；每项含 `parent_id`、`norm_count`（直属条款数）、`child_count`（子目录数）、`created_by`、`created_by_name`、`can_delete` 与 `can_rename`（见下），前端据此拼树并决定是否画行尾按钮。
+- `POST` / `PATCH` 的 `parent_id` 传 `0` 或留空表示放到一级。以下情况会报错：上级不是一级目录（会变成三级）→ 400；上级已停用 → 400；把自己挂到自己下面 → 400；`name` 在同一上级目录下重复 → 409。
+- 一级目录只要还有子目录，停用与删除都返回 409，需先移走或删除子目录；`PATCH` 把带子目录的目录挂到别的目录下同样返回 409。
+- `PATCH` 只改名字时**可以不传 `description`**：缺这个字段会保留原值，不会被清空（表单里没带说明的改名请求不该顺手抹掉说明）。要清空就显式传 `description: ""`。
+
+**目录权限**：目录是「谁建的谁管」，比模块级的四动作权限更细，分三档：
+
+| 操作 | 谁可以 | 拦截点 |
+| --- | --- | --- |
+| 查看目录与文档 | 所有人，含未登录访客 | `norms` 的 `can_view`；访客类型默认只读 |
+| 新增目录（POST） | 任何登录用户，其用户类型对 `norms` 有 `can_create` | 路由层 `require_module(..., "create")`；未登录 → **401** |
+| 改名（PATCH，只发 `name`） | 创建人本人；管理员可改任何目录（含系统预置） | handler 内按 `created_by` 判定；越权 → **403** |
+| 改上级 / 停用（PATCH 带 `parent_id` / `active`） | 仅管理员 | 同一个 handler；非管理员带上这两个字段 → **403** |
+| 删除目录（DELETE） | 创建人本人；管理员可删任何目录（含系统预置） | handler 内按 `created_by` 判定；越权 → **403** |
+
+两处容易踩的地方：
+
+- **目录的 DELETE 不按模块的 `can_delete` 放行**。路由层把 `/api/norm-categories/` 的 `DELETE` 显式映射成 `edit` 动作过模块闸门，真正的归属判断在 `delete_norm_category` 里按 `created_by` 做。原因是模块表只能表达「这个类型能不能删这个模块」，表达不了「同类型用户之间只能删自己建的」；若照旧用 `can_delete`，一个普通成员要么被整模块拦死，要么被放行后删掉别人的目录。改名同理：`PATCH` 在路由层本就是 `edit` 动作，归属判断在 handler 里由 `can_rename_norm_category()` 做——它与 `can_delete_norm_category()` 是同一条规则，刻意保持一致，免得同一行上出现「能改名、不能删」这种看着像 bug 的组合。
+- **「改上级目录」和「停用」没有跟着改名一起下放**，仍然只有管理员能做。这两件动的是「目录摆在哪、别人还能不能看到这份文档」，跟「给我自己建的东西换个名字」不是一回事。非管理员在 `PATCH` 里带上 `parent_id` 或 `active` 会收到 **403**，而不是被静默忽略——静默忽略会让人以为改生效了。
+- **`can_delete` / `can_rename` 由后端算好下发**，前端只负责画按钮 / 放行双击、不加判断逻辑（`list_norm_categories` 与 `GET /api/norms/document` 的每份文档都会带上）。这样「谁不能删、谁不能改名」只有一处实现。**但有一个例外要记住**：管理员在「以某类型视角预览」时，服务端仍以管理员身份算这两个标记（返回 `true`），而预览是纯前端的。归属是「具体某个人建的」、无法从一个**用户类型**推出，所以前端在预览模式下**一律不放行删除和改名**（`canCreateNormCategory` 的 `＋` 仍按被预览类型的 `create` 权限决定）。这是有意的收敛：宁可让预览看到最保守的一面，也不要把管理员身份漏进预览。
 
 文档按分类拆分为多份，`GET /api/norms/document` 一次返回全部：
 
-- `documents`：数组，每个分类一项，含 `category_id`（未归类的桶为 `null`）、`name`、`description`、`title`（`{分类名}规范`）、`article_count`、`chapters`（单元素数组）与 `markdown`。
+- `documents`：数组，每个分类一项，含 `category_id`（未归类的桶为 `null`）、`parent_id`、`parent_name`、`level`（`1` 或 `2`）、`child_count`、`name`、`description`、`title`（`{分类名}规范`）、`created_by_name`、`can_delete`、`can_rename`、`article_count`、`chapters`（单元素数组）与 `markdown`。数组顺序同样是树序，前端靠 `parent_id` 还原缩进。左侧目录行尾的「×」按 `can_delete` 画，`can_rename` 则决定**双击目录名**能不能进就地改名态（改名没有按钮）。
+- `chapters[].articles[]`：每条条款含 `no`（份内序号）、`id`、`title`、`content`、`scope`、`source`、`status`、`effective_from`、`effective_to`、`created_by_name`、`created_at`、`can_edit` 与 `images`。**文档是规范页唯一的读取与编辑入口**（页面上不再有独立的条目列表），所以条款要自带这两样：`can_edit` 由 `can_edit_norm()` 算好下发（作者本人 + 管理员，与 `update_norm` 用的是同一个函数），前端只画按钮、不重新实现归属规则；`status` 供编辑表单回填。
 - `stats`：`total` / `active` / `pending` / `abolished` / `category_count`。
 
+**父目录文档只含直属条款**：把条款记在「python研发流程」下，不会出现在「研发流程」那份文档里。父子各是一份独立文档，`parent_id` 只影响导航缩进与管理列表分组。
+
 **条款号是「份内序号」**：每份文档从 `1` 开始按记录顺序排（`1`、`2`、`3`…），不带分类前缀。文档之间靠 `category_id` 与 `title` 区分，不再有全局编号，因此分类增删或排序都不会让已有编号发生变化。跨文档引用用文字表述，如「见《研发流程规范》第 2 条」。
+
+**正文支持超链接**：`content` 里写 Markdown 链接 `[文字](https://…)`，或直接写裸网址 `https://…`。文档视图会渲染成可点击链接（仅 `http`/`https`，其它协议一律按纯文本输出，避免 `javascript:` 之类可执行协议），导出的 `.md` 保持标准 Markdown 链接语法。
+
+**正文支持插图**：图片不写进 `content`，正文里只放一个服务端签发的整数 id —— `[[img:12]]`。这样正文没有 URL、没有 HTML，既不需要为了插图放开 `innerHTML`，将来换存储后端也不用改正文。
+
+- 上传走 `POST /api/norm-images`，请求体 `{"data_url": "data:image/png;base64,…", "name": "登录流程图.png"}`，返回 `{"image": {"id": 12, "url": "/api/norm-images/12", "marker": "[[img:12]]", …}}`。**上传只是"暂存"**：行里的 `norm_id` 留空，等保存条款时由正文里出现的标记来绑定。所以「传了图又取消编辑」只会留下一条暂存行，24 小时后被下一次上传顺手清掉（`sweep_staged_norm_images`，同时删库里的行和磁盘上的文件）。
+- 保存条款（`POST /api/norms`、`PATCH /api/norms/{id}`）时按正文里的标记绑定，并把**这条条款之前引用、这次正文里没出现的图解绑**（`norm_id` 置空，文件和行都留着）——撤销一次插入应当是免费的，标记粘回去仍然有效。单条上限 20 张；引用了不存在、已删除或不属于本组织的 id → **400**，宁可拒绝保存，也不存下一条注定裂图的条款。
+- 条款下发时多带 `images`：`[{id, filename, mime_type, byte_size, caption, url}]`，`url` 形如 `/api/norm-images/12?v=20260923230749`（`?v=` 是时间戳，用来让长缓存失效）。**前端渲染只认这张表**：正文里有标记、但表里没有的 id 会画一句「图片已移除」，不留裂图。
+- 图片**必须**走 `GET /api/norm-images/{id}`，不能挂成静态资源：`serve_static` 完全不校验登录，而且它对所有资源硬编码 `Cache-Control: no-store`，图片走它等于每次滚动都全量重传。这个接口自己过 `norms` 的 `can_view` 闸门 + 组织可见范围检查，响应带 `X-Content-Type-Options: nosniff` 与 `Content-Security-Policy: default-src 'none'; sandbox`，并可长缓存（`private, max-age=86400`）。非数字路径返回 404 而不是 500。
+- 类型白名单 **JPG / PNG / WebP**，按**文件签名（魔数）**校验而不是 `Content-Type`，单张上限 5 MB。**有意不放行 SVG**：图片是作为文档直接下发给浏览器的，而 SVG 能内嵌脚本。前端上传前会先压缩（长边 1600px、转 WebP），在入口就把体积压下来。
+- ⚠️ 图片文件存放在 `data/uploads/norms/YYYY/MM/`，**不进数据库**。原因是 `scripts/db_snapshot.py` 用 `sqlite3.backup()` 整库逐页复制并跑 `PRAGMA integrity_check` 全库校验，而 `deploy.ps1` 的一次上线要跑两遍（灰度阶段拷正式库、Promote 阶段备份正式库），回滚还要第三遍——二进制数据进库会让每次上线的开销随图片量线性增长，`data/backups/` 也会跟着膨胀。`data/` 同时是唯一被部署流程排除的目录，放别处会被发布快照固化或被 `robocopy /MIR` 删掉。
 
 未引入版本概念：文档是 `norms` 表的实时投影，随手记或修改后立即重排，没有草稿/正式版之分，也没有快照。`norm_doc_versions` 表保留在建表语句中，但当前没有任何接口读写它。
 
 进入文档的条件是 `status='active'` 且（`effective_to` 为空或 ≥ 今天）；`pending`（管理员复核标记）与 `abolished` 都不进文档。**空分类也会保留一份空文档**，让导航与「规范分类」一一对应，不会出现"刚建的分类不见了"。
+
+⚠️ **一个已知的口径后果**：页面上没有独立条目列表，把条款改成 `abolished` / `pending` 后它会立刻退出文档，界面上就没有入口改回来了（数据还在，可用 `PATCH /api/norms/{id}` 把 `status` 改回去；回收站只覆盖软删除的 `deleted_at`）。要恢复"先藏起来、之后还能翻出来"的能力，可以给文档接口加一个 `include_abolished` 开关——这是有意留在后面的，不是漏了。
 
 分类下仍有未删除条目时，停用与删除分类都会返回 409，避免条款从文档中凭空消失。删除条目走软删除并进入回收站（`entity_type` 为 `norm`）。
 

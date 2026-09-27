@@ -33,6 +33,12 @@ STATIC_DIR = ROOT / "static"
 DATA_DIR = Path(os.environ.get("TEAM_LOOP_DATA_DIR") or (ROOT / "data")).resolve()
 DB_PATH = Path(os.environ.get("TEAM_LOOP_DB_PATH") or (DATA_DIR / "weekly_team.db")).resolve()
 BACKUP_DIR = Path(os.environ.get("TEAM_LOOP_BACKUP_DIR") or (DATA_DIR / "backups")).resolve()
+# 用户上传的资产（规范正文插图）落在 data/uploads 下，数据库只存相对路径。
+# 位置是硬约束，不是偏好：deploy.ps1 的 release 快照只拷 server.py/team_loop/static/previews，
+# 手工覆盖部署用 robocopy /MIR /XD data —— 只有 data 既不会被快照固化也不会被镜像删掉，
+# 所以上传文件绝不能放 static/。数据库也不存二进制：db_snapshot.py 是整库逐页备份 +
+# 完整性校验，一次上线要跑两次，图片进库会让每次上线的开销随图片量线性增长。
+UPLOAD_DIR = Path(os.environ.get("TEAM_LOOP_UPLOAD_DIR") or (DATA_DIR / "uploads")).resolve()
 DEPLOY_ENV = (os.environ.get("TEAM_LOOP_ENV") or "development").strip().lower()
 RELEASE_ID = (os.environ.get("TEAM_LOOP_RELEASE") or "local").strip()
 TRUST_PROXY = (os.environ.get("TEAM_LOOP_TRUST_PROXY") or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -98,6 +104,19 @@ TEAM_MOMENT_IMAGE_TYPES = {
 TEAM_MOMENT_MAX_IMAGES = 6
 TEAM_MOMENT_MAX_IMAGE_BYTES = 5 * 1024 * 1024
 
+# 规范正文插图：与团队时刻同款白名单（类型 + 魔数双重校验，不信 Content-Type）。
+# 有意不放行 SVG —— 它能内嵌脚本，而图片是作为文档直接下发到浏览器的。
+NORM_IMAGE_TYPES = {
+    "image/jpeg": (b"\xff\xd8\xff", ".jpg"),
+    "image/png": (b"\x89PNG\r\n\x1a\n", ".png"),
+    "image/webp": (b"RIFF", ".webp"),
+}
+NORM_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+NORM_IMAGE_MAX_PER_NORM = 20
+# 正文里的图片占位标记：只存服务端签发的整数 id，不存 URL、不存 HTML。
+# 这样正文没有注入面（不用放开 innerHTML），换存储后端时正文也一个字都不用改。
+NORM_IMAGE_MARKER = r"\[\[img:(\d+)\]\]"
+
 NORM_STATUSES = {"active", "pending", "abolished"}
 # 预置规范分类：新团队首次启动时按组织单元播种一次，之后由管理员自行维护。
 NORM_DEFAULT_CATEGORIES = [
@@ -156,7 +175,9 @@ INITIAL_TYPE_OPERATIONS = {
         "links": (1, 1, 1, 1),
     },
     GUEST_USER_TYPE_KEY: {
-        module: (1, 0, 0, 0) for module in LEGACY_GUEST_MODULES
+        **{module: (1, 0, 0, 0) for module in LEGACY_GUEST_MODULES},
+        # 访客只读：团队规范是大家共读的规则，访客（含未登录）能看到文档，但不参与增删目录与条款。
+        "norms": (1, 0, 0, 0),
     },
 }
 MORNING_STATUSES = {"todo", "doing", "risk", "done"}

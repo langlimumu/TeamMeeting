@@ -110,11 +110,20 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 | 表 | 用途 |
 | --- | --- |
-| `norm_categories` | 按团队隔离的规范分类，决定文档分成几份，`org_unit_id + name` 在团队内唯一 |
+| `norm_categories` | 按团队隔离的规范分类（目录），最多两级：`parent_id` 为空即一级目录，非空则挂在该目录下；`created_by` 记创建人，决定谁有权删；重名只在**同一上级目录内**唯一（唯一索引 `org_unit_id + COALESCE(parent_id, 0) + name`） |
 | `norms` | 成员随手记的规范条目：标题、说明、适用范围、来源、状态、生效/失效日期 |
+| `norm_images` | 规范正文的插图：**只存相对路径**，图片本体在 `data/uploads/norms/YYYY/MM/` 下；`norm_id` 为空表示「已上传但还没被任何条款引用」的暂存图；`deleted_at` 是软删，规范删除会进回收站、可以恢复，硬删图片会让恢复后裂图 |
 | `norm_doc_versions` | 预留表：统一规范文档的发布快照结构（版本号、生效日期、修订说明、章节全文、变更摘要），**当前版本不读写** |
 
 规范文档不是独立编辑的文本，而是 `norms` 的实时投影：**每个分类各自成一份文档**，条款号是**份内序号**（`1`、`2`、`3`…），每份文档都从 `1` 重新排，不带分类前缀；文档之间靠 `category_id` 与标题区分。没有草稿/正式版的区分，也没有发布快照。`norm_doc_versions` 仅在建表语句中保留，供将来引入版本管理时使用——这样老库无需迁移，也没有任何接口依赖它。`status` 取值为 `active`、`pending`（管理员复核标记）、`abolished`；只有 `active` 且未过 `effective_to` 的条目进入文档。分类下仍有未删除条目时不允许停用或删除该分类。
+
+**两级目录**：一级目录下可以再建子目录（如「研发流程」下的「python研发流程」），**两级都能直接放条款**。父目录与子目录各自成一份独立文档，父目录文档**只显示直属条款**，不会把子目录的条款并进来；`parent_id` 只用于导航缩进与管理列表分组。层级上限固定为 2：新增/移动目录时若上级本身已是二级目录，会返回 400。停用或删除一级目录时，只要它下面还有子目录就返回 409，必须先移走或删除子目录。
+
+**目录权限落在数据上，不落在角色上**：`norm_categories.created_by` 记录谁建的目录，删除时据此判定——`created_by` 等于当前用户即可删，管理员不看这一列、任何目录都能删。系统预置的 6 个分类由播种逻辑写入，`created_by` 为空，语义是「全团队共用的」，只有管理员能删。为什么不用角色表（`module_permissions`）表达「只能删自己建的」：那张表是**类型 × 模块**的粗粒度闸门，表达不了「同类型用户之间还要按记录归属区分」；而把归属判断放到 handler 里，`can_delete` 就能作为字段随列表一起下发给前端，前端不必把同一条规则再抄一遍。改名 / 换上级 / 停用仍走 `require_admin()`，因为改的是「大家怎么看这份文档」，不是「我自己建的东西」。
+
+老库升级不需要手工迁移：`parent_id` 与 `created_by` 都由 `ensure_column` 补列（存量分类全部落到一级、`created_by` 留空即当作系统预置），启动时 `DROP INDEX IF EXISTS idx_norm_categories_unit_name` 换建成按 parent 作用域的唯一索引——旧索引范围更宽，换成范围更窄的索引不会因既有数据冲突。`data\weekly_team.db` 这类老库直接启动即可。
+
+**插图为什么不进库**：`norm_images` 只存相对路径，字节落在 `data/uploads/norms/YYYY/MM/` 下。`scripts/db_snapshot.py` 用 `sqlite3.backup()` 整库逐页复制并跑一遍 `PRAGMA integrity_check` 全库校验，而 `deploy.ps1` 一次完整上线要生成两遍快照（灰度阶段拷正式库、Promote 阶段备份正式库）、回滚还要第三遍——图片进库会让这些操作的开销随图片量线性增长，`data/backups/` 里也会堆起同等体积的完整副本。`data/` 同时是唯一被部署流程排除的目录（手工覆盖用 `robocopy /MIR /XD data`；release 快照只拷 `server.py`、`team_loop`、`static`、`previews`），上传文件放这里既不会被发布快照固化，也不会被镜像同步删掉。这张表不需要迁移：`CREATE TABLE IF NOT EXISTS` 与 `idx_norm_images_norm`、`idx_norm_images_orphan` 两个索引在启动时自动补齐，存量数据一条不动。
 
 ### 系统治理
 

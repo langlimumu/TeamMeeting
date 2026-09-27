@@ -6318,7 +6318,9 @@ body.link-column-resizing {
   font-weight: 700;
 }
 
-/* 同 .norm-actions-cell：flex 必须挂在内层 div，不能直接挂 td */
+/* 注意：td 上不能直接挂 display:flex —— 会生成匿名 table-cell 包裹盒，
+   导致本格的下边框画在按钮底部、与同一行其它格的下边框错位。
+   flex 只能加在 td 内部的 div 上（行内按钮同理，必须有一层自己的容器）。 */
 .user-actions-cell {
   white-space: nowrap;
 }
@@ -11983,12 +11985,38 @@ body[data-theme] .morning-navigator .morning-nav-order-actions button:hover {
 
 .norm-doc-body {
   display: grid;
-  grid-template-columns: 168px minmax(0, 1fr);
+  /* 236px 而不是 168px：二级目录要多缩进一格，行尾还要站两个小操作按钮（＋ 子目录 /
+     × 删除），预留不够「python研发流程」这类名字加上计数徽标就只剩省略号。改名已经没有
+     按钮了（双击就改），所以不用为第三个按钮再让出 20px。 */
+  grid-template-columns: 236px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
 }
 
 .norm-doc-nav {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  padding-right: 12px;
+}
+
+/* 表头不跟着列表滚动：目录树长起来以后，「＋ 一级目录」仍要随手可点。 */
+.norm-nav-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.norm-nav-head-title {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.norm-nav-list {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -11996,8 +12024,34 @@ body[data-theme] .morning-navigator .morning-nav-order-actions button:hover {
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-width: thin;
-  border-right: 1px solid var(--line);
-  padding-right: 12px;
+}
+
+/* 表头按钮也是 <button>：和 .norm-nav-item 一样必须补 body[data-theme] 变体，
+   否则会被主题里特异性更高的宽泛 button 规则刷成实心色块。
+   这里刻意不加 .secondary：主题里 body[data-theme="miro"] button.secondary 的特异性
+   (0,2,1) 反而高过 .norm-nav-add 的主题变体 (0,2,0)。 */
+.norm-nav-add,
+body[data-theme] .norm-nav-add {
+  width: auto;
+  min-width: 0;
+  min-height: 26px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.norm-nav-add:hover,
+body[data-theme] .norm-nav-add:hover {
+  border-color: var(--blue);
+  background: transparent;
+  color: var(--blue);
+  box-shadow: none;
+  transform: none;
 }
 
 /* 主题里有 `body[data-theme="miro"] button` 这类宽泛规则，特异性高于单个类选择器，
@@ -12071,6 +12125,156 @@ body[data-theme] .norm-nav-item.is-active {
   font-size: 12px;
 }
 
+/* 两级目录：一级目录下可以再挂子目录，子目录缩进并带一条竖向辅助线。
+   折叠按钮同样是 <button>，所以和 .norm-nav-item 一样必须补 body[data-theme] 变体，
+   否则会被主题里特异性更高的宽泛 button 规则刷成实心块。 */
+.norm-nav-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.norm-nav-row {
+  display: grid;
+  /* 折叠按钮列 / 目录名 / 行尾操作按钮。没有子目录的行用一个占位 span 顶住第一列，
+     否则目录名会掉进 20px 的窄列里被挤扁。 */
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  gap: 2px;
+  align-items: center;
+  min-width: 0;
+}
+
+.norm-nav-toggle,
+body[data-theme] .norm-nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-width: 0;
+  min-height: 26px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.norm-nav-toggle:hover,
+body[data-theme] .norm-nav-toggle:hover {
+  border-color: var(--line);
+  background: var(--panel-soft);
+  color: var(--ink);
+  box-shadow: none;
+  transform: none;
+}
+
+/* 没有子目录的行用它占住折叠按钮那一列，只占位不响应鼠标。 */
+.norm-nav-toggle.is-placeholder {
+  pointer-events: none;
+}
+
+/* 行尾的操作按钮：「＋ 子目录」只出现在一级目录上，「× 删除」只出现在自己建的（或管理员
+   看得到的）目录上——两个条件都由后端下发的 can_delete 决定，前端不重算。改名没有按钮，
+   双击目录名就地改（见下面的 .norm-nav-input）。两个都是 <button>，照例补 body[data-theme]
+   变体，否则会被主题里特异性更高的宽泛 button 规则刷成实心块。 */
+.norm-nav-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.norm-nav-action,
+body[data-theme] .norm-nav-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  min-width: 0;
+  min-height: 20px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  /* 常显但压低存在感：藏到 hover 里在触屏上根本点不到。 */
+  opacity: 0.5;
+}
+
+.norm-nav-action:hover,
+body[data-theme] .norm-nav-action:hover {
+  opacity: 1;
+  border-color: var(--line);
+  background: var(--panel-soft);
+  color: var(--ink);
+  box-shadow: none;
+  transform: none;
+}
+
+.norm-nav-action.is-danger:hover,
+body[data-theme] .norm-nav-action.is-danger:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* 双击目录名就地改名：目录名那一格整个换成输入框，回车保存 / Esc 取消 / 点到别处也保存。
+   输入框照例补 body[data-theme] 变体——主题里 `body[data-theme="miro"] input` 这类规则是
+   (0,1,2)，高于单个类选择器，(0,2,1) 的成对写法才压得住；不写的话 miro/dingtalk 下会变回
+   主题那套输入框底色。 */
+.norm-nav-editing {
+  display: flex;
+  min-width: 0;
+}
+
+.norm-nav-input,
+body[data-theme] .norm-nav-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: none;
+  color: var(--ink);
+  padding: 4px 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.norm-nav-input:focus,
+body[data-theme] .norm-nav-input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(51, 112, 255, 0.12);
+  transform: none;
+}
+
+/* 改名时提示键盘怎么收场——改名只在键盘上留了回车 / Esc，光靠猜猜不到。 */
+.norm-nav-hint {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.norm-nav-children {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin-left: 9px;
+  padding-left: 9px;
+  border-left: 1px dashed var(--line);
+}
+
+.norm-nav-children[hidden] {
+  display: none;
+}
+
 /* 窄屏时左侧导航会把正文挤到 300px 以内，改为顶部横向条 */
 @media (max-width: 1360px) {
   .norm-doc-body {
@@ -12081,16 +12285,64 @@ body[data-theme] .norm-nav-item.is-active {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    max-height: none;
-    overflow: visible;
     border-right: 0;
     border-bottom: 1px solid var(--line);
     padding: 0 0 12px;
   }
 
+  /* 横向条里表头单独占一行，目录列表跟着换行平铺。 */
+  .norm-nav-head {
+    flex: 1 1 100%;
+  }
+
+  .norm-nav-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: none;
+    overflow: visible;
+  }
+
   .norm-nav-item,
   body[data-theme] .norm-nav-item {
     width: auto;
+  }
+
+  /* 横向条里改名输入框得自己撑开：.norm-nav-editing 作为 flex 项宽度由内容决定，里面再写
+     width:100% 会解不出来（父级宽度反过来又取决于它）→ 塌成一条。给它一个确定的 flex-basis。 */
+  .norm-nav-editing {
+    flex: 1 1 180px;
+  }
+
+  .norm-nav-input,
+  body[data-theme] .norm-nav-input {
+    min-width: 140px;
+  }
+
+  /* 横向条里没有纵向层级可言：子目录直接平铺在同一行，折叠按钮收起。
+     这里用 [hidden] 覆盖 base 里的 display:none，必须写在后面才生效。 */
+  .norm-nav-group,
+  .norm-nav-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .norm-nav-children,
+  .norm-nav-children[hidden] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .norm-nav-toggle,
+  body[data-theme] .norm-nav-toggle {
+    display: none;
   }
 }
 
@@ -12164,6 +12416,129 @@ body[data-theme] .norm-nav-item.is-active {
   line-height: 1.6;
 }
 
+/* 条款标题行：标题在左、操作按钮在右。按钮必须是标题的兄弟节点而不是子节点
+   （<button> 不能嵌 <button>），标题也不是 flex 容器，所以另起一层 head 包住两者。 */
+.norm-article-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 6px;
+}
+
+/* 覆盖上面的 .norm-article h4（同为 0,1,1，靠文件顺序生效）：间距交给 head 管。 */
+.norm-article-head h4 {
+  min-width: 0;
+  margin: 0;
+}
+
+.norm-article-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* 尺寸跟着 .norm-row-actions 的旧口径走；主题里裸 button 的特异性高于单类，
+   所以按仓库约定写成 X, body[data-theme] X 成对（虽然只设尺寸、不设配色）。 */
+.norm-article-actions button,
+body[data-theme] .norm-article-actions button {
+  width: auto;
+  min-width: 54px;
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* 二级目录的文档在正文顶部标出上级，避免两份同名子目录看混。 */
+.norm-chapter-path {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+/* 正文里插入的链接：条目列表和文档视图共用同一套渲染。 */
+.norm-link {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+
+/* 正文里的插图：单独成行并跟着容器缩放，避免长图把正文撑出横向滚动。 */
+.norm-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 8px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+/* 正文里还留着标记、但后端已不再下发这张图时的占位说明（不留裂图）。 */
+.norm-image-missing {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 表单里的缩略图：让「已经插进去的图」在保存之前就看得见。 */
+.norm-image-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.norm-image-thumb {
+  position: relative;
+  margin: 0;
+  width: 72px;
+  height: 72px;
+}
+
+.norm-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+/* 移除按钮也是裸 <button>：主题里 button 规则的特异性高于单类，
+   照仓库约定写成 X, body[data-theme] X 成对，否则尺寸会被顶掉。
+   放在缩略图内部而不是外面：凸出去就会被面板边缘裁掉或撑出横向滚动。 */
+.norm-image-thumb-remove,
+body[data-theme] .norm-image-thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  line-height: 1;
+  font-size: 12px;
+  border-radius: 50%;
+}
+
+.norm-link-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.norm-link-tools .hint-line {
+  margin: 0;
+}
+
+.norm-link-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
 .hint-line {
   margin: 0 0 8px;
   color: var(--muted);
@@ -12197,6 +12572,9 @@ body[data-theme] .norm-nav-item.is-active {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* 一行里要放「2 条 · 2 个子目录 · 张三创建」这样的元信息和两个按钮，
+     340px 侧栏里放不下。允许换行让按钮整体落到第二行，比把文案挤断好看。 */
+  flex-wrap: wrap;
   gap: 8px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -12227,6 +12605,8 @@ body[data-theme] .norm-nav-item.is-active {
   display: flex;
   flex: 0 0 auto;
   gap: 6px;
+  /* 换行后按钮整体仍然贴右，和第一行的目录名对齐成两栏。 */
+  margin-left: auto;
 }
 
 .norm-category-actions button {
@@ -12237,6 +12617,30 @@ body[data-theme] .norm-nav-item.is-active {
   font-size: 12px;
 }
 
+/* 子目录在管理列表里缩进一格，和左侧导航的层级读法保持一致。 */
+.norm-category-children {
+  display: grid;
+  gap: 8px;
+  margin-left: 12px;
+  padding-left: 10px;
+  border-left: 1px dashed var(--line);
+}
+
+.norm-category-item.is-child {
+  background: transparent;
+}
+
+.norm-category-branch {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* 分类表单多了「上级目录」一列，单列堆叠比沿用 .form-row.slim 的三列更好读。
+   必须带 .form-row 前缀，否则特异性低于 .form-row.slim 而不生效。 */
+.form-row.norm-category-form {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 @media (min-width: 1101px) {
   /* 宽屏下右侧栏只有 340px，栏内表单改为单列堆叠：
      .form-row.slim 的两列最小宽度（180 + 130 + 按钮）会超出栏宽把卡片撑破。
@@ -12245,153 +12649,6 @@ body[data-theme] .norm-nav-item.is-active {
   .norm-side .form-row.slim {
     grid-template-columns: minmax(0, 1fr);
   }
-}
-
-.norm-filter {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.norm-filter select,
-.norm-filter input:not([type="checkbox"]) {
-  width: auto;
-  min-width: 130px;
-}
-
-.norm-checkbox {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.norm-checkbox input {
-  flex: 0 0 auto;
-  width: 16px;
-  min-width: 0;
-  height: 16px;
-  min-height: 16px;
-  margin: 0;
-  padding: 0;
-  accent-color: var(--blue);
-}
-
-.norm-list {
-  margin-top: 8px;
-  overflow-x: auto;
-}
-
-.norm-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.norm-table th,
-.norm-table td {
-  border-bottom: 1px solid var(--line);
-  padding: 10px;
-  text-align: left;
-  vertical-align: top;
-}
-
-.norm-table th {
-  background: #f8fafc;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.norm-table td strong {
-  display: block;
-  line-height: 1.6;
-}
-
-.norm-table td p {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.norm-category-tag {
-  display: inline-block;
-  border-radius: 6px;
-  background: var(--panel-soft);
-  color: var(--blue);
-  padding: 2px 8px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.norm-row-meta {
-  color: var(--subtle) !important;
-  font-size: 11px !important;
-}
-
-.norm-row-owner {
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.norm-row-owner span {
-  color: var(--subtle);
-  font-size: 11px;
-}
-
-/* 注意：td 上不能直接挂 display:flex —— 会生成匿名 table-cell 包裹盒，
-   导致本格的下边框画在按钮底部、与同一行其它格的下边框错位。
-   flex 只能加在 td 内部的 div 上。 */
-.norm-actions-cell {
-  white-space: nowrap;
-}
-
-.norm-row-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.norm-row-actions button {
-  width: auto;
-  min-width: 54px;
-  min-height: 30px;
-  padding: 5px 10px;
-}
-
-.norm-row-locked {
-  color: var(--subtle);
-  font-size: 12px;
-}
-
-.norm-state {
-  display: inline-block;
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
-.norm-state-success {
-  background: #eaf7ef;
-  color: var(--green);
-}
-
-.norm-state-warn {
-  background: #fff4e5;
-  color: var(--orange);
-}
-
-.norm-state-muted {
-  background: #f1f2f6;
-  color: var(--muted);
 }
 
 @media (max-width: 1100px) {

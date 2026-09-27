@@ -1391,13 +1391,20 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            -- parent_id NULL = a top-level shelf; non-NULL = a sub-shelf of it. The tree is
+            -- deliberately capped at two levels: both levels hold norms and each category
+            -- owns its own document, so a third level would add no reading value.
+            -- created_by 记下「谁建的目录」：目录本人可以删，管理员可以删任何目录；
+            -- 预置分类由系统建（created_by 为空），只有管理员能删。
             CREATE TABLE IF NOT EXISTS norm_categories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                parent_id INTEGER REFERENCES norm_categories(id),
                 name TEXT NOT NULL,
                 description TEXT,
                 sort_order INTEGER NOT NULL DEFAULT 0,
                 active INTEGER NOT NULL DEFAULT 1,
+                created_by INTEGER REFERENCES users(id),
                 created_at TEXT NOT NULL
             );
 
@@ -1419,6 +1426,24 @@ def init_db():
                 updated_at TEXT NOT NULL,
                 deleted_at TEXT,
                 deleted_by INTEGER
+            );
+
+            -- 规范正文插图。表里只存相对路径，图片本体在 DATA_DIR/uploads 下 —— 见
+            -- config.UPLOAD_DIR 的注释：data 是唯一不会被发布快照或 robocopy /MIR 碰到的目录。
+            -- norm_id 为空表示「已上传但还没被任何规范引用」的暂存图，保存规范时绑定。
+            -- deleted_at 是软删：规范删除会进回收站、可以恢复，硬删图片会让恢复后裂图。
+            CREATE TABLE IF NOT EXISTS norm_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                norm_id INTEGER REFERENCES norms(id),
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                stored_path TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                byte_size INTEGER NOT NULL DEFAULT 0,
+                caption TEXT,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                deleted_at TEXT
             );
 
             -- Reserved for a future document-versioning feature. The norms module does not
@@ -1674,6 +1699,11 @@ def init_db():
         ensure_column(conn, "morning_items", "active", "INTEGER NOT NULL DEFAULT 1")
         ensure_column(conn, "process_template_items", "parent_item_id", "INTEGER")
         ensure_column(conn, "process_instance_items", "parent_item_id", "INTEGER")
+        # 规范分类由一层扩成两层：老库里已有数据全部落在顶层（parent_id 为 NULL），无需回填。
+        ensure_column(conn, "norm_categories", "parent_id", "INTEGER")
+        # 目录创建人：老库升级时既有分类（含 6 个预置分类）created_by 为空，当作系统建的，
+        # 只有管理员能删——不给历史数据猜一个创建人。
+        ensure_column(conn, "norm_categories", "created_by", "INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active ON auth_sessions(user_id, revoked_at, expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash)")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity ON users(auth_source, external_subject) WHERE external_subject IS NOT NULL AND external_subject<>''")
@@ -1687,10 +1717,17 @@ def init_db():
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_duty_rosters_slot ON duty_rosters(org_unit_id, user_id, duty_date, start_time)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_date ON duty_rosters(duty_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_user_date ON duty_rosters(user_id, duty_date)")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_norm_categories_unit_name ON norm_categories(org_unit_id, name)")
+        # 规范分类重名只在该「上级目录」内成立：不同上级下可以各有一个「python研发流程」。
+        # 老库上的 (org_unit_id, name) 唯一索引范围过宽，先删掉再按 parent 建新的。
+        conn.execute("DROP INDEX IF EXISTS idx_norm_categories_unit_name")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_norm_categories_unit_parent_name ON norm_categories(org_unit_id, COALESCE(parent_id, 0), name)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_categories_unit ON norm_categories(org_unit_id, sort_order, active)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_categories_parent ON norm_categories(org_unit_id, COALESCE(parent_id, 0), sort_order)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_norms_unit_category ON norms(org_unit_id, deleted_at, status, sort_order)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_norms_category ON norms(category_id, sort_order)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_images_norm ON norm_images(norm_id, deleted_at, id)")
+        # 孤儿清理（上传后一直没被任何规范引用）按这个索引扫。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_images_orphan ON norm_images(deleted_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_norm_versions_unit ON norm_doc_versions(org_unit_id, published_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_activity ON team_posts(pinned, updated_at, created_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team_posts_org ON team_posts(org_unit_id, deleted_at, updated_at)")

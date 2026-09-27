@@ -75,6 +75,12 @@ class RequestHandlerMixin:
             if len(moment_image) == 3 and moment_image[:2] == ["api", "team-moment-images"] and method == "GET":
                 self.send_team_moment_image(int(moment_image[2]))
                 return
+            # 规范插图也走自己的路由，不进静态目录：serve_static 不做鉴权，而且它的
+            # no-store 会让图片每次滚动都重传。
+            norm_image = parsed.path.strip("/").split("/")
+            if len(norm_image) == 3 and norm_image[:2] == ["api", "norm-images"] and method == "GET":
+                self.send_norm_image(norm_image[2])
+                return
             if parsed.path.startswith("/api/"):
                 result = self.route_api(method, parsed.path, parse_qs(parsed.query))
                 self.send_json(result)
@@ -402,6 +408,51 @@ class RequestHandlerMixin:
         self.wfile.write(content)
         self.wfile.flush()
 
+    def send_binary(self, content, mime_type, filename="", max_age=None):
+        """Send raw bytes with the headers an uploaded asset needs.
+
+        `max_age` is only ever passed for content addressed by a versioned URL (`?v=`):
+        without a version in the URL a long lifetime would outlive the file it describes.
+        Small fixed-size writes keep the response length reliable on Windows, the same
+        reason `serve_static` chunks its output.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", mime_type)
+        self.send_header("Content-Length", str(len(content)))
+        if filename:
+            self.send_header("Content-Disposition", f'inline; filename="{filename}"')
+        if max_age:
+            self.send_header("Cache-Control", f"private, max-age={int(max_age)}")
+        else:
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+        # 图片是作为文档下发给浏览器的：既不许被嗅探成别的类型，也不许它自己发起请求。
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        self.send_header("Connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        for offset in range(0, len(content), 64 * 1024):
+            self.wfile.write(content[offset:offset + 64 * 1024])
+        self.wfile.flush()
+
+    def send_norm_image(self, raw_id):
+        """Serve one norm illustration.
+
+        `raw_id` stays a string all the way in, so a non-numeric path answers 404 instead
+        of failing inside int() and surfacing as a 500.
+        """
+        user = self.current_user(required=False)
+        self.require_module(user, "norms", "view")
+        self.api_user = user
+        try:
+            image_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise AppError(404, "图片不存在")
+        image, content = self.read_norm_image(image_id, user)
+        extension = NORM_IMAGE_TYPES.get(image["mime_type"], ("", ""))[1]
+        self.send_binary(content, image["mime_type"], filename=f"norm-{image_id}{extension}", max_age=86400)
+
     def current_user(self, required=True):
         cookies = parse_cookies(self.headers.get("Cookie"))
         token = cookies.get("weekly_session")
@@ -493,7 +544,7 @@ class RequestHandlerMixin:
             return "shifts"
         if path.startswith("/api/duty-rosters") or path.startswith("/api/dashboards/duty"):
             return "oncall"
-        if path.startswith("/api/norms") or path.startswith("/api/norm-categories"):
+        if path.startswith("/api/norms") or path.startswith("/api/norm-categories") or path.startswith("/api/norm-images"):
             return "norms"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
@@ -503,15 +554,18 @@ class RequestHandlerMixin:
             return "members"
         return None
 
-    def require_module(self, user, module_key, action="view"):
-        if not module_key:
-            return
-        if not user and action != "view":
-            raise AppError(401, "请先登录")
+    def module_permission(self, user, module_key, action="view"):
+        """不抛异常的 require_module 版本。
+
+        给 handler 用：要下发 can_delete 这类标记时，需要先知道"这个请求本身是否会被放行"，
+        否则同一条规则会在前端再抄一遍，两边迟早漂移。
+        """
+        if not module_key or module_key not in MODULE_KEYS:
+            return False
         if user and user.get("role") == "admin":
-            return
-        if module_key not in MODULE_KEYS:
-            raise AppError(403, "当前账号无权访问该模块")
+            return True
+        if not user and action != "view":
+            return False
         action = action if action in PERMISSION_ACTIONS else "view"
         column = {
             "view": "can_view",
@@ -528,12 +582,28 @@ class RequestHandlerMixin:
                 """,
                 ((user.get("user_type") if user else GUEST_USER_TYPE_KEY) or DEFAULT_USER_TYPE_KEY, module_key),
             ).fetchone()
-        process_create = bool(user and module_key == "processes" and action == "create")
-        if not row or not row["can_view"] or (not row["allowed"] and not process_create):
-            if not user:
-                raise AppError(403, "访客无权查看该模块")
-            action_name = {"view": "查看", "create": "新增", "edit": "编辑", "delete": "删除"}[action]
-            raise AppError(403, f"当前用户类型无权{action_name}该模块内容")
+        if not row or not row["can_view"]:
+            return False
+        if row["allowed"]:
+            return True
+        return bool(user and module_key == "processes" and action == "create")
+
+    def require_module(self, user, module_key, action="view"):
+        if not module_key:
+            return
+        if not user and action != "view":
+            raise AppError(401, "请先登录")
+        if user and user.get("role") == "admin":
+            return
+        if module_key not in MODULE_KEYS:
+            raise AppError(403, "当前账号无权访问该模块")
+        if self.module_permission(user, module_key, action):
+            return
+        if not user:
+            raise AppError(403, "访客无权查看该模块")
+        action = action if action in PERMISSION_ACTIONS else "view"
+        action_name = {"view": "查看", "create": "新增", "edit": "编辑", "delete": "删除"}[action]
+        raise AppError(403, f"当前用户类型无权{action_name}该模块内容")
 
     def health(self):
         try:
@@ -574,6 +644,11 @@ class RequestHandlerMixin:
         self.api_user = user
         parts = path.strip("/").split("/")
         action = {"GET": "view", "POST": "create", "PATCH": "edit", "DELETE": "delete"}.get(method, "view")
+        # 规范目录（一级/二级）和「规范条目」不是一回事：目录的规则是「本人建的本人能删，
+        # 管理员都能删」，比模块级的 can_delete 更细，所以按 edit 放行，本人还是管理员
+        # 由 delete_norm_category 按 created_by 判定；条目的删除权限不受影响。
+        if method == "DELETE" and path.startswith("/api/norm-categories/"):
+            action = "edit"
         self.require_module(user, self.module_for_path(path), action)
 
         if path == "/api/team-posts":
@@ -851,6 +926,10 @@ class RequestHandlerMixin:
                 return self.create_norm(user)
         if path == "/api/norms/document" and method == "GET":
             return self.norm_document()
+        # 上传只是「暂存」：图片先落盘入库、norm_id 留空，保存条款时由
+        # bind_norm_images() 绑定，所以上传接口不需要 norm_id。
+        if path == "/api/norm-images" and method == "POST":
+            return self.create_norm_image(user)
         if len(parts) == 3 and parts[:2] == ["api", "norms"]:
             if method == "PATCH":
                 return self.update_norm(int(parts[2]), user)

@@ -75,12 +75,13 @@ const state = {
   dutyUsers: [],
   dutyToday: [],
   normCategories: [],
-  norms: [],
   normDocument: null,
   normActiveCategory: "",
-  normCategoryFilter: "",
-  normKeyword: "",
-  normIncludeAbolished: false,
+  normNavCollapsed: {},
+  // 正在就地改名的目录（存 normDocKey）。null = 没在改名。
+  normRenamingKey: null,
+  // 导航上「同一个目录刚被点过」的痕迹，用来自己判定双击（见 normNavClickIsDouble）。
+  normNavLastClick: { key: "", at: 0 },
   editingNormId: null,
   editingNormCategoryId: null,
   activeShiftPopoverDate: null,
@@ -5328,37 +5329,55 @@ function moveDutyMonth(delta) {
   loadOncall().catch((error) => toast(error.message));
 }
 
-const normStateMeta = {
-  active: { label: "生效中", tone: "success" },
-  scheduled: { label: "待生效", tone: "warn" },
-  expired: { label: "已过期", tone: "warn" },
-  pending: { label: "待确认", tone: "warn" },
-  abolished: { label: "已废止", tone: "muted" },
-};
-
-function normStateBadge(norm) {
-  const meta = normStateMeta[norm.state] || normStateMeta.active;
-  return `<span class="norm-state norm-state-${meta.tone}">${escapeHtml(meta.label)}</span>`;
+/* 条款行尾「编辑」按钮的显示条件。can_edit 由后端按 can_edit_norm()（作者本人 + 管理员）
+   算好下发，前端不重新实现归属规则。预览模式例外——预览是按「用户类型」演的，而归属是
+   「具体某个人写的」，从一个类型推不出来，所以预览时一律不画（与目录删除按钮同一条约定）。 */
+function canEditNorm(article) {
+  if (!state.user || !article) return false;
+  if (state.permissionPreview) return false;
+  return Boolean(article.can_edit);
 }
 
-function normCategoryName(norm) {
-  return norm.category_name || "未分类";
+/* 目录的三种写操作：建要模块 create 权限（访客没有），改名和删除要「自己建的 + 模块 edit
+   权限」。can_delete / can_rename 由后端按 created_by 算好下发（管理员恒为 true），前端
+   只用它决定「放不放行」以及拦下时给什么提示，不把归属规则再实现一遍——两处各写一遍
+   迟早会漂移。 */
+function canCreateNormCategory() {
+  return Boolean(state.user) && canOperate("norms", "create");
 }
 
-function canEditNorm(norm) {
-  if (!state.user) return false;
-  if (isAdminView()) return true;
-  return Number(norm.created_by) === Number(state.user.id) && canOperate("norms", "edit");
+/* 预览模式按「用户类型」演，而目录归属是「具体某个人建的」——一个类型里谁建过目录无从
+   判定，所以预览时一律不放行改名/删除：宁可看到最保守的一面，也不要把管理员身份漏进
+   预览。（后端算标记时用的仍是真实身份，预览是纯前端的，这一点改不掉，只能在这里挡。） */
+function canDeleteNormCategory(category) {
+  if (!state.user || !category) return false;
+  if (state.permissionPreview) return false;
+  return Boolean(category.can_delete) && canOperate("norms", "edit");
 }
 
-function normRowMeta(norm) {
-  const parts = [];
-  if (norm.scope) parts.push(`适用：${norm.scope}`);
-  if (norm.source) parts.push(`来源：${norm.source}`);
-  if (norm.effective_from) parts.push(`生效：${norm.effective_from}`);
-  if (norm.effective_to) parts.push(`失效：${norm.effective_to}`);
-  if (norm.updated_at && norm.updated_at !== norm.created_at) parts.push(`更新：${shortDate(norm.updated_at)}`);
-  return parts.join(" · ") || "未填写补充信息";
+function canRenameNormCategory(category) {
+  if (!state.user || !category) return false;
+  if (state.permissionPreview) return false;
+  return Boolean(category.can_rename) && canOperate("norms", "edit");
+}
+
+/* 改名不再有按钮，拦住时就得靠一句提示说清"为什么不行"——否则双击没反应会被当成卡了。
+   先分「模块权限不够」还是「归属不对」，再说清是谁建的。 */
+function normRenameDeniedMessage(item) {
+  if (!state.user) return "请先登录再修改目录名称";
+  if (state.permissionPreview) return "正在以其他用户类型预览，预览模式下不能改名";
+  if (!canOperate("norms", "edit")) return "当前账号没有修改规范目录的权限，请联系管理员";
+  if (item && item.created_by_name) {
+    return `只能改自己创建的目录，「${item.name}」是 ${item.created_by_name} 建的`;
+  }
+  return `「${item && item.name ? item.name : "该目录"}」是系统预置目录，只有管理员能改名`;
+}
+
+function syncNormWritePermissions() {
+  const addRoot = $("#normAddRootCategoryBtn");
+  if (addRoot) addRoot.classList.toggle("hidden", !canCreateNormCategory());
+  // 访客只读：连「随手记一条规范」的表单都不显示，免得填完才被 403 拦回来。
+  $("#normCreatePanel")?.classList.toggle("hidden", !canCreateNormCategory());
 }
 
 function normArticleMeta(article) {
@@ -5370,24 +5389,80 @@ function normArticleMeta(article) {
   return parts.join(" · ");
 }
 
+/* 图片标记和链接共用一次遍历：分开扫会让 [[img:12]] 被链接规则或转义拆开。
+   图片分支只认服务端签发的整数 id —— 正文里既没有 URL 也没有 HTML，因此没有注入面，
+   也不需要为了插图把 innerHTML 放回来。 */
+const normLinkPattern = /\[\[img:(\d+)\]\]|\[([^\]\n]*)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"')]+)/g;
+
+function normLinkHref(raw) {
+  const value = String(raw || "").trim();
+  // 只认 http/https：悬停时能看到真实地址，也堵掉 javascript: 这类可执行协议。
+  return /^https?:\/\/\S+$/i.test(value) ? value : "";
+}
+
+/* 把 [[img:id]] 还原成 <img>。只认后端随条款下发的图片表：表里没有的 id 说明图片已失效，
+   这里给一句可读的说明，而不是留一个裂图。src 一律来自服务端下发的地址，正文存不下 URL。 */
+function normArticleImageHtml(rawId, images) {
+  const imageId = Number(rawId);
+  const image = (images || []).find((item) => Number(item.id) === imageId);
+  if (!image) return `<span class="norm-image-missing">［图片已移除］</span>`;
+  const alt = image.caption || image.filename || "规范插图";
+  return `<img class="norm-image" src="${escapeHtml(image.url)}" alt="${escapeHtml(alt)}" loading="lazy" />`;
+}
+
+function formatNormContent(text, images) {
+  const source = String(text || "");
+  if (!source) return "";
+  let html = "";
+  let cursor = 0;
+  let match;
+  normLinkPattern.lastIndex = 0;
+  while ((match = normLinkPattern.exec(source)) !== null) {
+    html += escapeHtml(source.slice(cursor, match.index)).replace(/\n/g, "<br />");
+    if (match[1] !== undefined) {
+      html += normArticleImageHtml(match[1], images);
+    } else {
+      const href = normLinkHref(match[3] || match[4]);
+      const label = (match[2] || "").trim();
+      if (href) {
+        html += `<a class="norm-link" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label || href)}</a>`;
+      } else {
+        html += escapeHtml(label || match[4] || "");
+      }
+    }
+    cursor = match.index + match[0].length;
+  }
+  html += escapeHtml(source.slice(cursor)).replace(/\n/g, "<br />");
+  return html;
+}
+
+function normCategoryLabel(category) {
+  return category.parent_id ? `　└ ${category.name}` : category.name;
+}
+
 function renderNormCategoryOptions() {
   const categories = state.normCategories || [];
   const selectable = categories.filter((category) => category.active !== 0 || isAdminView());
   const options = selectable
-    .map((category) => `<option value="${category.id}">${escapeHtml(category.name)}</option>`)
+    .map((category) => `<option value="${category.id}">${escapeHtml(normCategoryLabel(category))}</option>`)
     .join("");
   $$("[data-norm-categories]").forEach((select) => {
     const previous = select.value;
     select.innerHTML = options;
     if (previous && [...select.options].some((option) => option.value === previous)) select.value = previous;
   });
-  const filter = $("#normCategoryFilter");
-  if (filter) {
-    filter.innerHTML = `<option value="">全部分类</option>${categories
-      .map((category) => `<option value="${category.id}">${escapeHtml(category.name)}（${Number(category.norm_count || 0)}）</option>`)
-      .join("")}`;
-    filter.value = state.normCategoryFilter || "";
-  }
+  renderNormCategoryParentOptions();
+}
+
+function renderNormCategoryParentOptions() {
+  const parents = (state.normCategories || []).filter((category) => !category.parent_id);
+  const select = $("#normCategoryParent");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = `<option value="0">（一级目录）</option>${parents
+    .map((category) => `<option value="${category.id}">${escapeHtml(category.name)}${category.active === 0 ? "（已停用）" : ""}</option>`)
+    .join("")}`;
+  select.value = [...select.options].some((option) => option.value === previous) ? previous : "0";
 }
 
 function renderNormFormMode() {
@@ -5430,34 +5505,137 @@ function activeNormDocument() {
 function selectNormCategory(key) {
   state.normActiveCategory = key || "";
   const active = activeNormDocument();
-  state.normCategoryFilter = active && active.category_id !== null && active.category_id !== undefined
-    ? String(active.category_id)
-    : "";
-  const filter = $("#normCategoryFilter");
-  if (filter) filter.value = state.normCategoryFilter;
+  if (active && active.parent_id !== null && active.parent_id !== undefined) {
+    state.normNavCollapsed[String(active.parent_id)] = false;
+  }
   renderNormNav();
   renderNormStats();
   renderNormDocument();
-  renderNormList();
+  syncNormCreateCategory();
 }
 
-function renderNormNav() {
-  const target = $("#normDocNav");
-  if (!target) return;
-  const documents = normDocuments();
-  if (!documents.length) {
-    target.innerHTML = `<p class="empty-note">还没有规范分类。</p>`;
-    return;
-  }
+/* 右侧「随手记一条规范」的分类跟着左侧选中的目录走：点哪个目录，表单就切到哪个目录，
+   省掉「先在左边点开目录看内容、再到右边重新选一遍分类」这一步。
+   编辑中不跟随——那会儿表单里的分类是被编辑条款的归属，跟着导航跳会把修改目标挪到别的目录。 */
+function syncNormCreateCategory() {
+  if (state.editingNormId) return;
+  const select = $('#normForm select[name="category_id"]');
+  if (!select) return;
   const active = activeNormDocument();
-  target.innerHTML = documents
-    .map((item) => {
-      const count = Number(item.article_count || 0);
-      return `
-      <button class="norm-nav-item ${item === active ? "is-active" : ""}" type="button" data-norm-doc="${escapeHtml(normDocKey(item))}">
+  const id = active && active.category_id !== null && active.category_id !== undefined
+    ? String(active.category_id)
+    : "";
+  // 「未分类」这个桶只在有孤儿条款时才出现、没有对应 option，保持原值不动。
+  if (id && [...select.options].some((option) => option.value === id)) select.value = id;
+}
+
+function normNavTree() {
+  const documents = normDocuments();
+  const byKey = new Map(documents.map((item) => [normDocKey(item), item]));
+  const roots = [];
+  const childrenOf = new Map();
+  documents.forEach((item) => {
+    const parentKey = item.parent_id === null || item.parent_id === undefined ? "" : String(item.parent_id);
+    if (parentKey && parentKey !== normDocKey(item) && byKey.has(parentKey)) {
+      if (!childrenOf.has(parentKey)) childrenOf.set(parentKey, []);
+      childrenOf.get(parentKey).push(item);
+    } else {
+      roots.push(item);
+    }
+  });
+  return { roots, childrenOf };
+}
+
+function normNavItemHtml(item, active) {
+  const key = normDocKey(item);
+  // 改名中：名字那一格整个换成输入框（而不是塞进按钮里——<input> 同样是交互元素，
+  // 放进 <button> 里和按钮嵌按钮一样会被浏览器拆 DOM）。
+  if (state.normRenamingKey && state.normRenamingKey === key) {
+    return `<span class="norm-nav-editing">
+        <input class="norm-nav-input" type="text" value="${escapeHtml(item.name)}" maxlength="24" data-norm-rename-input data-norm-rename-key="${escapeHtml(key)}" aria-label="目录名称，回车保存，Esc 取消" />
+      </span>`;
+  }
+  const count = Number(item.article_count || 0);
+  // 改名没有按钮了，得留个能发现它的地方：能改的行给一句悬停提示。
+  const hint = canRenameNormCategory(item) ? ` title="双击目录名可改名"` : "";
+  return `<button class="norm-nav-item ${item === active ? "is-active" : ""}" type="button" data-norm-doc="${escapeHtml(key)}"${hint}>
         <span class="norm-nav-name">${escapeHtml(item.name)}</span>
         ${count ? `<span class="norm-nav-count">${count}</span>` : ""}
       </button>`;
+}
+
+/* 目录行上的操作按钮：「＋ 子目录」只给一级目录，「× 删除」只给自己建的（或管理员看得到
+   的）目录，两个条件都由后端下发的标记决定。改名没有按钮——双击目录名就地改（见
+   beginNormRename）。这两个按钮是目录名按钮的兄弟节点而不是子节点——<button> 里不能嵌
+   <button>，嵌了浏览器会把 DOM 拆开，点击行为跟着变形。 */
+function normNavActionsHtml(item) {
+  const key = normDocKey(item);
+  // 「未分类」是 category_id 为空的虚拟桶，不是真目录：不能往里建子目录，也删不掉。
+  if (!key || key === "uncategorized") return "";
+  // 正在改名的那一行只留输入框：这会儿再摆着「＋/×」，光标就在鼠标旁边，太容易点错。
+  if (state.normRenamingKey === key) return "";
+  const encodedKey = escapeHtml(key);
+  const name = escapeHtml(item.name);
+  const buttons = [];
+  if (canCreateNormCategory() && !item.parent_id) {
+    buttons.push(
+      `<button class="norm-nav-action" type="button" data-norm-nav-add-child="${encodedKey}" title="在「${name}」下新建子目录" aria-label="在「${name}」下新建子目录">＋</button>`
+    );
+  }
+  if (canDeleteNormCategory(item)) {
+    const owner = item.created_by_name ? `由 ${escapeHtml(item.created_by_name)} 创建` : "系统预置目录";
+    buttons.push(
+      `<button class="norm-nav-action is-danger" type="button" data-norm-nav-delete="${encodedKey}" data-norm-nav-name="${name}" title="删除「${name}」（${owner}）" aria-label="删除目录「${name}」">×</button>`
+    );
+  }
+  return buttons.length ? `<span class="norm-nav-actions">${buttons.join("")}</span>` : "";
+}
+
+function normNavRowHtml(item, active, options = {}) {
+  const key = normDocKey(item);
+  const collapsed = Boolean(options.collapsed);
+  // 没有子目录的行也要占住折叠按钮那一列，否则目录名会掉进 20px 的网格列里被挤扁。
+  const toggle = options.hasChildren
+    ? `<button class="norm-nav-toggle" type="button" data-norm-nav-toggle="${escapeHtml(key)}" aria-expanded="${collapsed ? "false" : "true"}" aria-label="展开或收起子目录">${collapsed ? "▸" : "▾"}</button>`
+    : `<span class="norm-nav-toggle is-placeholder" aria-hidden="true"></span>`;
+  return `<div class="norm-nav-row">
+        ${toggle}
+        ${normNavItemHtml(item, active)}
+        ${normNavActionsHtml(item)}
+      </div>`;
+}
+
+function renderNormNav() {
+  syncNormWritePermissions();
+  const target = $("#normNavList");
+  if (!target) return;
+  const documents = normDocuments();
+  if (!documents.length) {
+    target.innerHTML = `<p class="empty-note">还没有规范目录${canCreateNormCategory() ? "，点上面的「＋ 一级目录」建一个。" : "。"}</p>`;
+    return;
+  }
+  const active = activeNormDocument();
+  const { roots, childrenOf } = normNavTree();
+  // 改名只在键盘上留了 Esc/回车，得写出来——不然有人会以为必须点别处才能收场。
+  const renameHint = state.normRenamingKey
+    ? `<p class="norm-nav-hint">改名中：回车保存 · Esc 取消（点到别处也会保存）</p>`
+    : "";
+  target.innerHTML = renameHint + roots
+    .map((item) => {
+      const key = normDocKey(item);
+      const children = childrenOf.get(key) || [];
+      if (!children.length) {
+        return `<div class="norm-nav-group">${normNavRowHtml(item, active)}</div>`;
+      }
+      // 当前正在读的文档永远可见：即使父目录被收起，也把它下面的子目录展开。
+      const collapsed = Boolean(state.normNavCollapsed[key]) && !children.some((child) => child === active);
+      return `
+      <div class="norm-nav-group">
+        ${normNavRowHtml(item, active, { hasChildren: true, collapsed })}
+        <div class="norm-nav-children"${collapsed ? " hidden" : ""}>
+          ${children.map((child) => normNavRowHtml(child, active)).join("")}
+        </div>
+      </div>`;
     })
     .join("");
 }
@@ -5483,8 +5661,9 @@ function renderNormStats() {
   if (title) title.textContent = doc.title || "团队规范";
   const meta = $("#normDocMeta");
   if (meta) {
+    const childCount = documents.filter((item) => item.level === 2).length;
     meta.textContent = documents.length
-      ? `按分类分成 ${documents.length} 份文档，成员随手记的规则标准会立即编入对应分类。`
+      ? `按分类分成 ${documents.length} 份文档${childCount ? `（其中 ${childCount} 个二级目录）` : ""}，成员随手记的规则标准会立即编入对应分类。`
       : "还没有规范分类，先在右侧新增一个分类，再随手记规则标准。";
   }
   const download = $("#normDownloadBtn");
@@ -5497,9 +5676,10 @@ function renderNormStats() {
   if (heading) heading.textContent = active ? active.title : "规范文档";
   const hint = $("#normDocHint");
   if (hint) {
+    const path = active && active.parent_name ? `上级目录：${active.parent_name} · ` : "";
     hint.textContent = active && active.description
-      ? active.description
-      : "条款号由系统自动生成，每份文档内从 1 开始、按记录顺序排列。";
+      ? `${path}${active.description}`
+      : `${path}条款号由系统自动生成，每份文档内从 1 开始、按记录顺序排列。`;
   }
 }
 
@@ -5508,73 +5688,80 @@ function renderNormDocument() {
   if (!target) return;
   const doc = activeNormDocument();
   if (!doc) {
-    target.innerHTML = `<p class="empty-note">还没有规范分类，先在右侧新增一个分类。</p>`;
+    target.innerHTML = canCreateNormCategory()
+      ? `<p class="empty-note">还没有规范目录，点左侧「＋ 一级目录」建一个。</p>`
+      : `<p class="empty-note">还没有规范目录。</p>`;
     return;
   }
   const chapter = (doc.chapters || [])[0] || { articles: [] };
   const articles = chapter.articles || [];
   if (!articles.length) {
-    target.innerHTML = `<p class="empty-note">「${escapeHtml(doc.name)}」下还没有生效中的规范条款，先在右侧随手记一条。</p>`;
+    const childCount = Number(doc.child_count || 0);
+    const tail = childCount
+      ? `子目录下另有 ${childCount} 份文档，点左侧子目录查看。`
+      : "右侧表单已选好本目录，直接记一条即可。";
+    target.innerHTML = `<p class="empty-note">「${escapeHtml(doc.name)}」下还没有生效中的规范条款，${tail}</p>`;
     return;
   }
   target.innerHTML = `
     <section class="norm-chapter">
+      ${doc.parent_name ? `<p class="norm-chapter-path">${escapeHtml(doc.parent_name)} / ${escapeHtml(chapter.name)}</p>` : ""}
       <h3>${escapeHtml(chapter.name)}</h3>
       ${chapter.description ? `<p class="norm-chapter-desc">${escapeHtml(chapter.description)}</p>` : ""}
       ${articles.map((article) => `
         <article class="norm-article" id="norm-article-${article.id}" data-norm-title="${escapeHtml(article.title)}">
-          <h4><span class="norm-article-no">${escapeHtml(article.no)}</span>${escapeHtml(article.title)}</h4>
-          ${article.content ? `<p class="norm-article-body">${escapeHtml(article.content).replace(/\n/g, "<br />")}</p>` : ""}
+          <div class="norm-article-head">
+            <h4><span class="norm-article-no">${escapeHtml(article.no)}</span>${escapeHtml(article.title)}</h4>
+            ${normArticleActionsHtml(article)}
+          </div>
+          ${article.content ? `<p class="norm-article-body">${formatNormContent(article.content, article.images)}</p>` : ""}
           ${normArticleMeta(article) ? `<p class="norm-article-meta">${normArticleMeta(article)}</p>` : ""}
         </article>`).join("")}
     </section>`;
 }
 
-function filteredNorms() {
-  const keyword = state.normKeyword.trim().toLowerCase();
-  return (state.norms || []).filter((norm) => {
-    if (state.normCategoryFilter && String(norm.category_id || "") !== state.normCategoryFilter) return false;
-    if (!keyword) return true;
-    return [norm.title, norm.content, norm.scope, norm.source, norm.category_name, norm.created_by_name]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase()
-      .includes(keyword);
-  });
+/* 每条规范行尾的按钮：「编辑」按后端下发的 can_edit 画；「删除」沿用模块级 delete 权限
+   （后端 delete_norm 只过模块闸门、不做归属判断，默认用户类型本来就是 0，即只有管理员能删）。
+   两个按钮是并列的兄弟节点——<button> 不能嵌 <button>，也不能塞进 <h4> 里。 */
+function normArticleActionsHtml(article) {
+  const canEdit = canEditNorm(article);
+  const canDelete = canOperate("norms", "delete");
+  if (!canEdit && !canDelete) return "";
+  return `
+    <div class="norm-article-actions">
+      ${canEdit ? `<button class="secondary norm-edit-btn" type="button" data-norm-id="${article.id}">编辑</button>` : ""}
+      ${canDelete ? `<button class="danger norm-delete-btn" type="button" data-norm-id="${article.id}" data-norm-title="${escapeHtml(article.title)}">删除</button>` : ""}
+    </div>`;
 }
 
-function renderNormList() {
-  const target = $("#normList");
-  if (!target) return;
-  const items = filteredNorms();
-  if (!items.length) {
-    target.innerHTML = `<p class="empty-note">${(state.norms || []).length ? "没有匹配的规范条目。" : "还没有规范条目，先在右侧随手记一条。"}</p>`;
-    return;
+/* 按 id 从文档里找条款。编辑表单要回填分类，而条款对象本身不带 category_id——分类是它所属
+   那份文档的属性，所以在这里补上，前端就不必再依赖已经撤掉的条目列表。 */
+function findNormArticle(normId) {
+  const target = String(normId);
+  for (const item of normDocuments()) {
+    for (const chapter of item.chapters || []) {
+      const article = (chapter.articles || []).find((entry) => String(entry.id) === target);
+      if (article) return { ...article, category_id: item.category_id };
+    }
   }
-  target.innerHTML = `
-    <table class="norm-table">
-      <thead><tr><th>分类</th><th>规范内容</th><th>状态</th><th>记录</th><th>操作</th></tr></thead>
-      <tbody>
-        ${items.map((norm) => `
-          <tr>
-            <td><span class="norm-category-tag">${escapeHtml(normCategoryName(norm))}</span></td>
-            <td>
-              <strong>${escapeHtml(norm.title)}</strong>
-              ${norm.content ? `<p>${escapeHtml(norm.content)}</p>` : ""}
-              <p class="norm-row-meta">${escapeHtml(normRowMeta(norm))}</p>
-            </td>
-            <td>${normStateBadge(norm)}</td>
-            <td class="norm-row-owner">${escapeHtml(norm.created_by_name || "")}<span>${escapeHtml(shortDate(norm.created_at))}</span></td>
-            <td class="norm-actions-cell">
-              <div class="norm-row-actions">
-                ${canEditNorm(norm) ? `<button class="secondary norm-edit-btn" type="button" data-norm-id="${norm.id}">编辑</button>` : ""}
-                ${canOperate("norms", "delete") ? `<button class="danger norm-delete-btn" type="button" data-norm-id="${norm.id}" data-norm-title="${escapeHtml(norm.title)}">删除</button>` : ""}
-                ${!canEditNorm(norm) && !canOperate("norms", "delete") ? `<span class="norm-row-locked">仅可查看</span>` : ""}
-              </div>
-            </td>
-          </tr>`).join("")}
-      </tbody>
-    </table>`;
+  return null;
+}
+
+function normCategoryTree() {
+  const categories = state.normCategories || [];
+  const byId = new Map(categories.map((category) => [String(category.id), category]));
+  const roots = [];
+  const childrenOf = new Map();
+  categories.forEach((category) => {
+    const parentKey = category.parent_id === null || category.parent_id === undefined ? "" : String(category.parent_id);
+    if (parentKey && parentKey !== String(category.id) && byId.has(parentKey)) {
+      if (!childrenOf.has(parentKey)) childrenOf.set(parentKey, []);
+      childrenOf.get(parentKey).push(category);
+    } else {
+      roots.push(category);
+    }
+  });
+  return { roots, childrenOf };
 }
 
 function renderNormCategoryList() {
@@ -5585,31 +5772,36 @@ function renderNormCategoryList() {
     target.innerHTML = `<p class="empty-note">还没有分类。</p>`;
     return;
   }
-  target.innerHTML = categories
-    .map((category) => `
-      <div class="norm-category-item ${category.active === 0 ? "is-off" : ""}">
+  const { roots, childrenOf } = normCategoryTree();
+  // 增删已经移到左侧「目录」上（那里是目录树本身，点着更直接），这里只留改名/停用。
+  const itemHtml = (category, isChild) => `
+      <div class="norm-category-item ${category.active === 0 ? "is-off" : ""} ${isChild ? "is-child" : ""}">
         <div class="norm-category-main">
-          <strong>${escapeHtml(category.name)}</strong>
-          <span>${Number(category.norm_count || 0)} 条${category.active === 0 ? " · 已停用" : ""}</span>
+          <strong>${isChild ? `<span class="norm-category-branch">└</span> ` : ""}${escapeHtml(category.name)}</strong>
+          <span>${Number(category.norm_count || 0)} 条${Number(category.child_count || 0) ? ` · ${Number(category.child_count)} 个子目录` : ""}${category.active === 0 ? " · 已停用" : ""}${category.created_by_name ? ` · ${escapeHtml(category.created_by_name)}创建` : ""}</span>
         </div>
         <div class="norm-category-actions">
-          <button class="secondary norm-category-edit-btn" type="button" data-category-id="${category.id}">重命名</button>
+          <button class="secondary norm-category-edit-btn" type="button" data-category-id="${category.id}">编辑</button>
           <button class="secondary norm-category-toggle-btn" type="button" data-category-id="${category.id}" data-category-active="${category.active === 0 ? 1 : 0}">${category.active === 0 ? "启用" : "停用"}</button>
-          <button class="danger norm-category-delete-btn" type="button" data-category-id="${category.id}" data-category-name="${escapeHtml(category.name)}">删除</button>
         </div>
-      </div>`)
+      </div>`;
+  target.innerHTML = roots
+    .map((category) => {
+      const children = childrenOf.get(String(category.id)) || [];
+      const group = itemHtml(category, false) +
+        (children.length ? `<div class="norm-category-children">${children.map((child) => itemHtml(child, true)).join("")}</div>` : "");
+      return group;
+    })
     .join("");
 }
 
 async function loadNorms() {
-  const includeAbolished = state.normIncludeAbolished ? "1" : "0";
-  const [categoryData, normData, documentData] = await Promise.all([
+  // 只取「目录 + 文档」两份：条目列表已撤掉，文档本身就是唯一的读取与编辑入口。
+  const [categoryData, documentData] = await Promise.all([
     api("/api/norm-categories"),
-    api(`/api/norms?include_abolished=${includeAbolished}`),
     api("/api/norms/document"),
   ]);
   state.normCategories = categoryData.categories || [];
-  state.norms = normData.norms || [];
   state.normDocument = documentData.document || null;
   const documents = normDocuments();
   if (!documents.some((item) => normDocKey(item) === state.normActiveCategory)) {
@@ -5620,7 +5812,7 @@ async function loadNorms() {
   syncNormCategoryFormMode();
   renderNormNav();
   renderNormDocument();
-  renderNormList();
+  syncNormCreateCategory();
   renderNormCategoryList();
   renderNormStats();
 }
@@ -5637,7 +5829,10 @@ function enterNormEdit(norm) {
   form.elements.source.value = norm.source || "";
   form.elements.effective_from.value = norm.effective_from || "";
   form.elements.effective_to.value = norm.effective_to || "";
+  // 编辑已有条款时把它的图片表灌进缓存，下面的缩略图才显示得出来。
+  (norm.images || []).forEach((image) => { normImageCache[String(image.id)] = image; });
   renderNormFormMode();
+  syncNormImageThumbs();
   const statusSelect = $("#normStatusSelect");
   if (statusSelect) statusSelect.value = norm.status || "active";
   form.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -5647,10 +5842,16 @@ function exitNormEdit() {
   state.editingNormId = null;
   $("#normForm")?.reset();
   renderNormFormMode();
+  syncNormImageThumbs();
+  // 取消编辑后让分类重新跟随左侧选中的目录（编辑期间它显示的是被编辑条款的归属）。
+  syncNormCreateCategory();
 }
 
 function syncNormCategoryFormMode() {
   const editing = Boolean(state.editingNormCategoryId);
+  // 表单只在「编辑」时露面：新建走左侧目录上的弹窗，两个入口并存只会让人多问一句「到底用哪个」。
+  const form = $("#normCategoryForm");
+  if (form) form.classList.toggle("hidden", !editing);
   const title = $("#normCategoryFormTitle");
   if (title) title.textContent = editing ? "修改规范分类" : "规范分类";
   const submit = $("#normCategorySubmitBtn");
@@ -5666,14 +5867,352 @@ function enterNormCategoryEdit(category) {
   form.elements.category_id.value = String(category.id);
   form.elements.name.value = category.name || "";
   form.elements.description.value = category.description || "";
+  if (form.elements.parent_id) form.elements.parent_id.value = String(category.parent_id || 0);
   syncNormCategoryFormMode();
   form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function openNormCategoryCreateModal(parent = null) {
+  const modal = $("#normCategoryModal");
+  const form = $("#normCategoryCreateForm");
+  if (!modal || !form) return;
+  if (!canCreateNormCategory()) {
+    toast("当前账号无权新建规范目录");
+    return;
+  }
+  // 「未分类」这种虚拟桶的 category_id 是空的，落到一级目录处理，免得把 undefined 当上级发出去。
+  const target =
+    parent && parent.category_id !== null && parent.category_id !== undefined ? parent : null;
+  form.reset();
+  form.elements.parent_id.value = target ? String(target.category_id) : "0";
+  const title = $("#normCategoryModalTitle");
+  if (title) title.textContent = target ? `在「${target.name}」下新建子目录` : "新建一级目录";
+  const submit = $("#normCategoryCreateSubmit");
+  if (submit) submit.textContent = "创建目录";
+  const hint = $("#normCategoryModalHint");
+  if (hint) {
+    hint.textContent = target
+      ? `子目录是一份独立文档，只装自己的条款；「${target.name}」的文档不会混进子目录的条款。`
+      : "一级目录下可以再建子目录，两级目录都能放条款。";
+  }
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+  document.body.classList.add("modal-open");
+  form.elements.name.focus();
+}
+
+function closeNormCategoryModal() {
+  const modal = $("#normCategoryModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("modal-open");
+}
+
+async function createNormCategory(payload) {
+  const result = await api("/api/norm-categories", { method: "POST", body: JSON.stringify(payload) });
+  const name = String(payload.name || "").trim();
+  const parentId = Number(payload.parent_id || 0) || 0;
+  const created = (result.categories || []).find(
+    (item) => item.name === name && (Number(item.parent_id || 0) || 0) === parentId
+  );
+  closeNormCategoryModal();
+  // 新目录直接打开它那份（空）文档，用户立刻看到"建好了"，不用在树里再找一遍。
+  if (created) state.normActiveCategory = String(created.id);
+  await loadNorms();
+  toast(`目录「${name}」已创建`);
+}
+
+/* 双击目录名就地改名。这里不用原生 dblclick 事件，而是自己比两次点击的时间戳：第一次
+   点击会调 renderNormNav() 重建整个列表，第二次点击落在**新节点**上，浏览器认为两次点击
+   的目标不同，dblclick 根本不会触发。比时间戳就与 DOM 有没有被重建无关了。 */
+function normNavClickIsDouble(key) {
+  if (!key) return false;
+  const now = Date.now();
+  const last = state.normNavLastClick || { key: "", at: 0 };
+  // 500ms：和系统默认的双击间隔同一量级，手感与文件管理器改名一致。
+  const isDouble = last.key === key && now - last.at <= 500;
+  // 判成双击就把痕迹清掉，免得连点三下被当成两次双击。
+  state.normNavLastClick = isDouble ? { key: "", at: 0 } : { key, at: now };
+  return isDouble;
+}
+
+function beginNormRename(key) {
+  const item = normDocuments().find((doc) => normDocKey(doc) === key);
+  if (!item) return;
+  // 「未分类」是 category_id 为空的虚拟桶，不是真目录，没有东西可改。
+  if (item.category_id === null || item.category_id === undefined) {
+    toast("「未分类」只是还没归档的条款集合，不是目录，不能改名");
+    return;
+  }
+  if (!canRenameNormCategory(item)) {
+    toast(normRenameDeniedMessage(item));
+    return;
+  }
+  state.normRenamingKey = key;
+  renderNormNav();
+  const input = $("#normNavList")?.querySelector("[data-norm-rename-input]");
+  if (!input) return;
+  input.focus();
+  input.select();
+}
+
+function cancelNormRename() {
+  if (!state.normRenamingKey) return;
+  // 先清状态再重绘：重绘会把输入框从 DOM 里摘掉，随后的 focusout 因为状态已空直接返回，
+  // 不会把「取消」当成「保存」。
+  state.normRenamingKey = null;
+  renderNormNav();
+}
+
+async function commitNormRename(input) {
+  if (!state.normRenamingKey || !input) return;
+  const key = state.normRenamingKey;
+  // 输入框是整行重绘出来的，手里这个可能已经是"上一轮"被换掉的节点（重绘触发的失焦）。
+  // 它兜着的是**别的目录**的内容，提交上去就成了张冠李戴，key 对不上直接丢弃。
+  if (input.dataset?.normRenameKey && input.dataset.normRenameKey !== key) return;
+  const item = normDocuments().find((doc) => normDocKey(doc) === key);
+  const name = String(input.value || "").trim();
+  // 同样先清状态再发请求：回车之后输入框失焦还会补一次 focusout，靠这里挡掉重复提交。
+  state.normRenamingKey = null;
+  // 没改、或者被清空：当取消处理，不发请求。
+  if (!item || !name || name === item.name) {
+    renderNormNav();
+    return;
+  }
+  try {
+    await renameNormCategory(item.category_id, name);
+  } catch (error) {
+    toast(error.message);
+    renderNormNav();
+  }
+}
+
+async function renameNormCategory(categoryId, name) {
+  // 只发 name：带上 parent_id 或 active 会被后端判成"非管理员想动层级"而 403，换上级目录和
+  // 停用仍归右侧「规范分类」面板（管理员）。description 不传，后端保留原值。
+  await api(`/api/norm-categories/${categoryId}`, { method: "PATCH", body: JSON.stringify({ name }) });
+  // 不去改 normActiveCategory：改名不改 key（key 就是 category_id），选中的还是它；而改名往往
+  // 紧跟着"去看另一个目录"，等请求回来的这几百毫秒里用户已经切走了，这里再写一次会把人家拽回来。
+  await loadNorms();
+  toast(`目录已改名为「${name}」`);
+}
+
+async function deleteNormCategory(categoryId, name) {
+  const category = (state.normCategories || []).find((item) => String(item.id) === String(categoryId));
+  if (!canDeleteNormCategory(category)) {
+    toast("只能删除自己创建的目录");
+    return;
+  }
+  if (!window.confirm(`确定删除目录「${name}」吗？目录下还有条款或子目录时要先处理掉；删除后无法恢复，只能重建。`)) return;
+  try {
+    await api(`/api/norm-categories/${categoryId}`, { method: "DELETE" });
+    await loadNorms();
+    toast("目录已删除");
+  } catch (error) {
+    toast(error.message);
+  }
 }
 
 function exitNormCategoryEdit() {
   state.editingNormCategoryId = null;
   $("#normCategoryForm")?.reset();
   syncNormCategoryFormMode();
+}
+
+function normalizeNormLinkInput(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  // 只写 example.com/doc 时补上 https；已经写了别的协议（如 javascript:）则原样交给校验拒绝。
+  const candidate = /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`;
+  return normLinkHref(candidate);
+}
+
+function toggleNormLinkRow(show) {
+  const row = $("#normLinkRow");
+  if (!row) return;
+  const visible = show === undefined ? row.classList.contains("hidden") : Boolean(show);
+  row.classList.toggle("hidden", !visible);
+  if (visible) {
+    $("#normLinkUrl")?.focus();
+    return;
+  }
+  const urlField = $("#normLinkUrl");
+  const textField = $("#normLinkText");
+  if (urlField) urlField.value = "";
+  if (textField) textField.value = "";
+}
+
+function insertNormLink() {
+  const form = $("#normForm");
+  const content = form?.elements?.content;
+  const urlField = $("#normLinkUrl");
+  if (!content || !urlField) return;
+  const href = normalizeNormLinkInput(urlField.value);
+  if (!href) {
+    toast("请填写链接地址，例如 https://example.com/doc");
+    return;
+  }
+  const label = ($("#normLinkText")?.value || "").trim();
+  const snippet = label ? `[${label}](${href})` : href;
+  const start = Number.isInteger(content.selectionStart) ? content.selectionStart : content.value.length;
+  const end = Number.isInteger(content.selectionEnd) ? content.selectionEnd : content.value.length;
+  const before = content.value.slice(0, start);
+  const after = content.value.slice(end);
+  const spacer = before && !/\s$/.test(before) ? " " : "";
+  content.value = `${before}${spacer}${snippet}${after}`;
+  const caret = (before + spacer + snippet).length;
+  content.setSelectionRange(caret, caret);
+  content.focus();
+  toggleNormLinkRow(false);
+  toast("已插入链接");
+}
+
+/* ---- 规范插图：压缩 → 上传 → 在光标处插入 [[img:id]] ---- */
+
+const NORM_IMAGE_ACCEPT = ["image/jpeg", "image/png", "image/webp"];
+const NORM_IMAGE_MAX_EDGE = 1600;
+const NORM_IMAGE_QUALITY = 0.85;
+/* id → {id, url, filename}。正文里只存 id，编辑时想看到图就得有这么一份旁路缓存；
+   它只由上传返回值和后端下发的条款图片填充，不参与任何渲染决策。 */
+const normImageCache = {};
+
+function loadNormImageElement(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("图片读取失败"));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function readNormFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+/* 上传前先把长边缩到 1600px 再转 WebP：内网截图动辄 2–5 MB，这一步在入口就把体积砍掉
+   八九成，比事后清理有效得多。转不出 WebP（或重编码反而变大）时退回原图，不阻断上传。 */
+async function compressNormImage(file) {
+  if (!NORM_IMAGE_ACCEPT.includes(file.type)) {
+    throw new Error("只支持 JPG、PNG 或 WebP 图片");
+  }
+  const original = await readNormFileAsDataUrl(file);
+  let image;
+  try {
+    image = await loadNormImageElement(file);
+  } catch (error) {
+    return original;
+  }
+  const longest = Math.max(image.naturalWidth, image.naturalHeight);
+  if (!longest) return original;
+  const scale = longest > NORM_IMAGE_MAX_EDGE ? NORM_IMAGE_MAX_EDGE / longest : 1;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return original;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  const compressed = canvas.toDataURL("image/webp", NORM_IMAGE_QUALITY);
+  return compressed.startsWith("data:image/webp") && compressed.length < original.length ? compressed : original;
+}
+
+async function uploadNormImage(file) {
+  const dataUrl = await compressNormImage(file);
+  const result = await api("/api/norm-images", {
+    method: "POST",
+    body: JSON.stringify({ data_url: dataUrl, name: file.name || "norm.webp" }),
+  });
+  const image = result.image || {};
+  normImageCache[String(image.id)] = image;
+  return image;
+}
+
+function setNormImageBusy(busy) {
+  const button = $("#normInsertImageBtn");
+  if (!button) return;
+  button.disabled = Boolean(busy);
+  button.textContent = busy ? "上传中…" : "插入图片";
+}
+
+function insertNormContentSnippet(snippet) {
+  const content = $("#normForm")?.elements?.content;
+  if (!content) return;
+  const start = Number.isInteger(content.selectionStart) ? content.selectionStart : content.value.length;
+  const end = Number.isInteger(content.selectionEnd) ? content.selectionEnd : content.value.length;
+  const before = content.value.slice(0, start);
+  const after = content.value.slice(end);
+  const spacer = before && !/\s$/.test(before) ? " " : "";
+  content.value = `${before}${spacer}${snippet}${after}`;
+  const caret = (before + spacer + snippet).length;
+  content.setSelectionRange(caret, caret);
+  content.focus();
+}
+
+async function insertNormImages(files) {
+  const list = [...(files || [])].filter((file) => file && file.type);
+  if (!list.length) return;
+  setNormImageBusy(true);
+  let inserted = 0;
+  try {
+    for (const file of list) {
+      const image = await uploadNormImage(file);
+      const snippet = image.marker || `[[img:${image.id}]]`;
+      // 多张图各占一行，免得挤成一段被当成同一个句子的插图。
+      insertNormContentSnippet(inserted ? `\n${snippet}` : snippet);
+      inserted += 1;
+    }
+    syncNormImageThumbs();
+    toast(inserted > 1 ? `已插入 ${inserted} 张图片` : "已插入图片");
+  } catch (error) {
+    toast(error.message || "图片插入失败");
+  } finally {
+    setNormImageBusy(false);
+  }
+}
+
+/* 编辑时正文里只有 [[img:id]]，看不到图会很别扭，所以在表单下面按标记出现顺序铺一行
+   缩略图。数据取自 normImageCache，正文本身依然只有 id。 */
+function syncNormImageThumbs() {
+  const box = $("#normImageThumbs");
+  const content = $("#normForm")?.elements?.content;
+  if (!box || !content) return;
+  const ids = [];
+  const pattern = /\[\[img:(\d+)\]\]/g;
+  let match;
+  while ((match = pattern.exec(content.value)) !== null) {
+    if (!ids.includes(match[1])) ids.push(match[1]);
+  }
+  const known = ids.map((id) => normImageCache[id]).filter(Boolean);
+  box.innerHTML = known
+    .map((image) => `
+      <figure class="norm-image-thumb">
+        <img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.filename || "规范插图")}" loading="lazy" />
+        <button type="button" class="norm-image-thumb-remove" data-norm-image-remove="${escapeHtml(String(image.id))}" aria-label="从正文移除这张图片">×</button>
+      </figure>`)
+    .join("");
+  box.classList.toggle("hidden", !known.length);
+}
+
+/* 只删正文里的标记，不动已上传的图片：撤销这次插入应当是免费的，而图片本身在
+   保存条款时才会被绑定，没人引用的暂存图由后端定期回收。 */
+function removeNormImageMarker(imageId) {
+  const content = $("#normForm")?.elements?.content;
+  const target = Number(imageId);
+  if (!content || !Number.isFinite(target)) return;
+  content.value = content.value.replace(new RegExp(`\\[\\[img:${target}\\]\\]\\s?`, "g"), "");
+  syncNormImageThumbs();
 }
 
 function downloadTextFile(filename, text) {
@@ -7257,7 +7796,13 @@ function bindEvents() {
   });
   bindForm("#normCategoryForm", (data) => {
     const categoryId = String(data.category_id || "").trim();
-    const payload = { name: data.name, description: data.description || "", active: 1 };
+    const payload = {
+      name: data.name,
+      description: data.description || "",
+      active: 1,
+      // "0" 表示一级目录：留空会被 formData 丢掉，所以用一个显式哨兵值表示「移到顶层」。
+      parent_id: data.parent_id || "0",
+    };
     const request = categoryId
       ? api(`/api/norm-categories/${categoryId}`, { method: "PATCH", body: JSON.stringify(payload) })
       : api("/api/norm-categories", { method: "POST", body: JSON.stringify(payload) });
@@ -7267,37 +7812,107 @@ function bindEvents() {
     });
   });
   $("#normDocNav")?.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-norm-nav-toggle]");
+    if (toggle) {
+      const key = toggle.dataset.normNavToggle;
+      state.normNavCollapsed[key] = !state.normNavCollapsed[key];
+      renderNormNav();
+      return;
+    }
+    const addChild = event.target.closest("[data-norm-nav-add-child]");
+    if (addChild) {
+      const parent = normDocuments().find((item) => normDocKey(item) === addChild.dataset.normNavAddChild);
+      openNormCategoryCreateModal(parent || null);
+      return;
+    }
+    const remove = event.target.closest("[data-norm-nav-delete]");
+    if (remove) {
+      deleteNormCategory(remove.dataset.normNavDelete, remove.dataset.normNavName).catch((error) => toast(error.message));
+      return;
+    }
     const item = event.target.closest("[data-norm-doc]");
-    if (item) selectNormCategory(item.dataset.normDoc);
+    if (item) {
+      const key = item.dataset.normDoc;
+      // 单击选中，同一目录在 500ms 内被点第二下就是双击改名（有权限才进得去，否则只给提示）。
+      if (normNavClickIsDouble(key)) {
+        beginNormRename(key);
+        return;
+      }
+      selectNormCategory(key);
+    }
   });
+  // 改名输入框的键盘：回车保存、Esc 取消。输入框是整行重绘出来的，所以按委托挂。
+  $("#normDocNav")?.addEventListener("keydown", (event) => {
+    if (!event.target.closest?.("[data-norm-rename-input]")) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitNormRename(event.target);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelNormRename();
+    }
+  });
+  // 点到别处（含点另一个目录）也算保存——只留回车一条路的话，鼠标用户会以为卡住了。
+  $("#normDocNav")?.addEventListener("focusout", (event) => {
+    const input = event.target.closest?.("[data-norm-rename-input]");
+    if (input) commitNormRename(input);
+  });
+  $("#normAddRootCategoryBtn")?.addEventListener("click", () => openNormCategoryCreateModal());
+  $("#normCategoryCreateForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = formData(event.currentTarget);
+    createNormCategory({
+      name: data.name,
+      description: data.description || "",
+      // "0" 是一级目录的哨兵值：留空会被 formData 丢掉。
+      parent_id: data.parent_id || "0",
+    }).catch((error) => toast(error.message));
+  });
+  $$("[data-norm-category-modal-close]").forEach((button) => button.addEventListener("click", closeNormCategoryModal));
+  $("#normInsertLinkBtn")?.addEventListener("click", () => toggleNormLinkRow());
+  $("#normLinkConfirm")?.addEventListener("click", () => insertNormLink());
+  $("#normLinkCancel")?.addEventListener("click", () => toggleNormLinkRow(false));
+  $("#normLinkUrl")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      insertNormLink();
+    }
+  });
+  $("#normInsertImageBtn")?.addEventListener("click", () => $("#normImageInput")?.click());
+  $("#normImageInput")?.addEventListener("change", (event) => {
+    // 先取快照再清空 value：FileList 是实时的，清空后它自己也会变空；
+    // 而留着 value 会让「连续选同一张图」不再触发 change。
+    const files = [...(event.target.files || [])];
+    event.target.value = "";
+    insertNormImages(files);
+  });
+  $("#normImageThumbs")?.addEventListener("click", (event) => {
+    const button = event.target.closest?.("[data-norm-image-remove]");
+    if (button) removeNormImageMarker(button.dataset.normImageRemove);
+  });
+  const normContentField = $("#normForm")?.elements?.content;
+  // 截图直接粘贴或拖进来是最顺手的路径，所以这两条也接住；粘贴纯文本不受影响。
+  normContentField?.addEventListener("paste", (event) => {
+    const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith("image/"));
+    if (!files.length) return;
+    event.preventDefault();
+    insertNormImages(files);
+  });
+  // dragover 必须拦，否则浏览器不会派发 drop。
+  normContentField?.addEventListener("dragover", (event) => event.preventDefault());
+  normContentField?.addEventListener("drop", (event) => {
+    const files = [...(event.dataTransfer?.files || [])].filter((file) => file.type.startsWith("image/"));
+    if (!files.length) return;
+    event.preventDefault();
+    insertNormImages(files);
+  });
+  normContentField?.addEventListener("input", () => syncNormImageThumbs());
   $("#normDownloadBtn")?.addEventListener("click", () => downloadNormDocument());
   $("#normScrollTopBtn")?.addEventListener("click", () => {
     $("#normDoc")?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
   $("#normCancelEditBtn")?.addEventListener("click", () => exitNormEdit());
   $("#normCategoryCancelBtn")?.addEventListener("click", () => exitNormCategoryEdit());
-  $("#normSearchInput")?.addEventListener("input", (event) => {
-    state.normKeyword = event.target.value || "";
-    renderNormList();
-  });
-  $("#normCategoryFilter")?.addEventListener("change", (event) => {
-    const value = event.target.value || "";
-    state.normCategoryFilter = value;
-    const matched = value
-      ? normDocuments().find((item) => item.category_id !== null && item.category_id !== undefined && String(item.category_id) === value)
-      : null;
-    if (matched) {
-      state.normActiveCategory = normDocKey(matched);
-      renderNormNav();
-      renderNormDocument();
-      renderNormStats();
-    }
-    renderNormList();
-  });
-  $("#normIncludeAbolished")?.addEventListener("change", (event) => {
-    state.normIncludeAbolished = Boolean(event.target.checked);
-    loadNorms().catch((error) => toast(error.message));
-  });
   $("#teamChatForm")?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -7547,6 +8162,7 @@ function bindEvents() {
       closeMemberScoreModal();
       closeLinkEditModal();
       closeLinkDeleteModal();
+      closeNormCategoryModal();
       closeLinkActionMenus();
       closeReminderModal();
       closeForumCreateModal();
@@ -8112,6 +8728,10 @@ function bindEvents() {
       closeLinkDeleteModal();
       return;
     }
+    if (event.target.closest("[data-norm-category-modal-close]") || event.target === $("#normCategoryModal")) {
+      closeNormCategoryModal();
+      return;
+    }
     if (event.target.closest("[data-link-delete-confirm]")) {
       if (pendingLinkDeleteId) {
         deleteLink(pendingLinkDeleteId).catch((error) => toast(error.message));
@@ -8445,8 +9065,9 @@ function bindEvents() {
     const normEdit = event.target.closest(".norm-edit-btn");
     if (normEdit) {
       event.stopPropagation();
-      const norm = state.norms.find((item) => Number(item.id) === Number(normEdit.dataset.normId));
-      if (norm) enterNormEdit(norm);
+      // 条款只从文档里取（列表已撤），顺带把所属目录补进去供编辑表单回填。
+      const article = findNormArticle(normEdit.dataset.normId);
+      if (article) enterNormEdit(article);
       return;
     }
     const normDelete = event.target.closest(".norm-delete-btn");
@@ -8474,28 +9095,6 @@ function bindEvents() {
         .then(loadNorms)
         .then(() => toast(active ? "分类已启用" : "分类已停用"))
         .catch((error) => toast(error.message));
-      return;
-    }
-    const normCategoryDelete = event.target.closest(".norm-category-delete-btn");
-    if (normCategoryDelete) {
-      event.stopPropagation();
-      if (!window.confirm(`确定删除分类「${normCategoryDelete.dataset.categoryName || ""}」吗？`)) return;
-      api(`/api/norm-categories/${normCategoryDelete.dataset.categoryId}`, { method: "DELETE" })
-        .then(loadNorms)
-        .then(() => toast("分类已删除"))
-        .catch((error) => toast(error.message));
-      return;
-    }
-    const normArticle = event.target.closest(".norm-article");
-    if (normArticle) {
-      const keyword = normArticle.dataset.normTitle || "";
-      if (keyword) {
-        state.normKeyword = keyword;
-        const search = $("#normSearchInput");
-        if (search) search.value = keyword;
-        renderNormList();
-        $("#normList")?.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
       return;
     }
   });

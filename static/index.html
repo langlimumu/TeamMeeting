@@ -463,6 +463,27 @@
             </div>
           </div>
 
+          <div id="normCategoryModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="normCategoryModalTitle" aria-hidden="true">
+            <div class="modal-card norm-category-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="normCategoryModalTitle">新建一级目录</h2>
+                  <p id="normCategoryModalHint">一级目录下可以再建子目录，两级目录都能放条款。</p>
+                </div>
+                <button class="modal-close" type="button" data-norm-category-modal-close aria-label="关闭">×</button>
+              </div>
+              <form id="normCategoryCreateForm" class="form-grid">
+                <input type="hidden" name="parent_id" value="0" />
+                <input name="name" placeholder="目录名称，如：python研发流程" maxlength="24" required />
+                <input name="description" placeholder="说明（选填）" />
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-norm-category-modal-close>取消</button>
+                  <button id="normCategoryCreateSubmit" type="submit">创建目录</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <section id="members" class="page active">
             <section class="member-layout" id="memberList"></section>
             <section class="panel team-forum-panel">
@@ -1169,7 +1190,13 @@
                 </div>
                 <p id="normDocHint" class="norm-doc-hint"></p>
                 <div class="norm-doc-body">
-                  <nav id="normDocNav" class="norm-doc-nav"></nav>
+                  <nav id="normDocNav" class="norm-doc-nav">
+                    <div class="norm-nav-head">
+                      <span class="norm-nav-head-title">目录</span>
+                      <button id="normAddRootCategoryBtn" class="norm-nav-add" type="button" title="新建一级目录">＋ 一级目录</button>
+                    </div>
+                    <div id="normNavList" class="norm-nav-list"></div>
+                  </nav>
                   <div id="normDoc" class="norm-doc"></div>
                 </div>
               </div>
@@ -1177,12 +1204,25 @@
               <aside class="panel norm-side">
                 <section id="normCreatePanel">
                   <h2 id="normFormTitle">随手记一条规范</h2>
-                  <p class="hint-line">一句话写清要求、选好分类，提交后立即出现在文档里。</p>
+                  <p class="hint-line">一句话写清要求即可，分类会自动跟着左侧选中的目录，也能在这里改。</p>
                   <form id="normForm" class="form-grid">
                     <input type="hidden" name="norm_id" value="" />
                     <select name="category_id" data-norm-categories required></select>
                     <input name="title" placeholder="一句话规则，如：提交代码前必须通过静态检查" maxlength="120" required />
-                    <textarea name="content" placeholder="详细说明（选填）：背景、判定口径、例外情况"></textarea>
+                    <textarea name="content" placeholder="详细说明（选填）：背景、判定口径、例外情况，可插入链接"></textarea>
+                    <div class="norm-link-tools">
+                      <button id="normInsertLinkBtn" class="secondary" type="button">插入链接</button>
+                      <button id="normInsertImageBtn" class="secondary" type="button">插入图片</button>
+                      <span class="hint-line">链接写法：&#91;文字&#93;(https://…)；图片也可以直接粘贴或拖进来</span>
+                    </div>
+                    <div id="normLinkRow" class="norm-link-row hidden">
+                      <input id="normLinkText" placeholder="链接文字（选填，留空就用网址）" />
+                      <input id="normLinkUrl" placeholder="https://example.com/doc" />
+                      <button id="normLinkConfirm" class="secondary" type="button">插入</button>
+                      <button id="normLinkCancel" class="secondary" type="button">取消</button>
+                    </div>
+                    <input id="normImageInput" class="hidden" type="file" accept="image/jpeg,image/png,image/webp" multiple />
+                    <div id="normImageThumbs" class="norm-image-thumbs hidden"></div>
                     <input name="scope" placeholder="适用范围（选填，如：全体研发）" />
                     <input name="source" placeholder="来源（选填，如：2026-09 周例会决议）" />
                     <label>生效日期<input name="effective_from" type="date" /></label>
@@ -1195,9 +1235,10 @@
 
                 <section id="normCategoryPanel" class="admin-only">
                   <h2 id="normCategoryFormTitle">规范分类</h2>
-                  <p class="hint-line">一个分类对应一份文档，分类名就是文档名；可停用不再使用的分类。</p>
-                  <form id="normCategoryForm" class="form-row slim">
+                  <p class="hint-line">建、删、改名都在左侧「目录」上操作（双击目录名就地改名）；这里负责换上级目录和停用。</p>
+                  <form id="normCategoryForm" class="form-row slim norm-category-form hidden">
                     <input type="hidden" name="category_id" value="" />
+                    <select id="normCategoryParent" name="parent_id"><option value="0">（一级目录）</option></select>
                     <input name="name" placeholder="分类名称" maxlength="24" required />
                     <input name="description" placeholder="说明（选填）" />
                     <button id="normCategorySubmitBtn">新增分类</button>
@@ -1206,21 +1247,6 @@
                   <div id="normCategoryList" class="norm-category-list"></div>
                 </section>
               </aside>
-            </section>
-
-            <section class="panel">
-              <div class="panel-title">
-                <div>
-                  <h2>规范条目</h2>
-                  <p>按分类查看全部条目，可编辑自己记录的条目、标记待确认或废止。</p>
-                </div>
-                <div class="norm-filter">
-                  <select id="normCategoryFilter"><option value="">全部分类</option></select>
-                  <input id="normSearchInput" placeholder="搜索关键词" />
-                  <label class="norm-checkbox"><input id="normIncludeAbolished" type="checkbox" /> 含已废止</label>
-                </div>
-              </div>
-              <div id="normList" class="norm-list"></div>
             </section>
           </section>
 

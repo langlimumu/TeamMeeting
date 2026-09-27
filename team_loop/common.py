@@ -165,30 +165,76 @@ def read_json(handler):
     return json.loads(raw or "{}")
 
 
-def decode_team_moment_image(value, index=0):
+def decode_image_data_url(value, index=0, image_types=None, max_bytes=None, label="图片", stem="image"):
+    """Validate a `data:<mime>;base64,...` payload and return the decoded bytes.
+
+    Shared by team moments and norm illustrations so the two features cannot drift
+    apart on what counts as an acceptable image. The type is checked against the file
+    signature rather than the declared mime type, and SVG is deliberately absent from
+    both whitelists: an uploaded image is served to the browser as a document, and SVG
+    can carry script.
+    """
+    image_types = image_types or TEAM_MOMENT_IMAGE_TYPES
+    max_bytes = max_bytes or TEAM_MOMENT_MAX_IMAGE_BYTES
     if not isinstance(value, dict):
         raise AppError(400, "图片数据格式不正确")
     data_url = str(value.get("data_url") or "")
     match = re.fullmatch(r"data:([^;,]+);base64,(.+)", data_url, re.DOTALL)
-    if not match or match.group(1).lower() not in TEAM_MOMENT_IMAGE_TYPES:
-        raise AppError(400, "团队时刻仅支持 JPG、PNG 或 WebP 图片")
+    if not match or match.group(1).lower() not in image_types:
+        raise AppError(400, f"{label}仅支持 JPG、PNG 或 WebP 图片")
     mime_type = match.group(1).lower()
     try:
         content = base64.b64decode(match.group(2), validate=True)
     except (ValueError, TypeError) as exc:
         raise AppError(400, "图片内容不是有效的 Base64 数据") from exc
-    if not content or len(content) > TEAM_MOMENT_MAX_IMAGE_BYTES:
-        raise AppError(400, "单张图片不能超过 5 MB")
-    signature, extension = TEAM_MOMENT_IMAGE_TYPES[mime_type]
+    if not content or len(content) > max_bytes:
+        raise AppError(400, f"单张图片不能超过 {max_bytes // (1024 * 1024)} MB")
+    signature, extension = image_types[mime_type]
     if not content.startswith(signature) or (mime_type == "image/webp" and content[8:12] != b"WEBP"):
         raise AppError(400, "图片内容与文件类型不一致")
-    original_name = Path(str(value.get("name") or f"moment-{index + 1}{extension}")).name
-    stem = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(original_name).stem).strip(".-") or f"moment-{index + 1}"
+    original_name = Path(str(value.get("name") or f"{stem}-{index + 1}{extension}")).name
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "-", Path(original_name).stem).strip(".-") or f"{stem}-{index + 1}"
     return {
-        "filename": f"{stem[:80]}{extension}",
+        "filename": f"{normalized[:80]}{extension}",
         "mime_type": mime_type,
         "data": content,
     }
+
+
+def decode_team_moment_image(value, index=0):
+    return decode_image_data_url(
+        value,
+        index=index,
+        image_types=TEAM_MOMENT_IMAGE_TYPES,
+        max_bytes=TEAM_MOMENT_MAX_IMAGE_BYTES,
+        label="团队时刻",
+        stem="moment",
+    )
+
+
+def decode_norm_image(value, index=0):
+    return decode_image_data_url(
+        value,
+        index=index,
+        image_types=NORM_IMAGE_TYPES,
+        max_bytes=NORM_IMAGE_MAX_BYTES,
+        label="规范插图",
+        stem="norm",
+    )
+
+
+def norm_upload_path(stored_path):
+    """Absolute path for a stored upload path, refusing anything outside UPLOAD_DIR.
+
+    `stored_path` is only ever written by the server, but it is still resolved and
+    fenced here: a traversal mistake elsewhere must not become an arbitrary file read.
+    """
+    root = UPLOAD_DIR.resolve()
+    relative = str(stored_path or "").replace("\\", "/").lstrip("/")
+    candidate = (root / relative).resolve()
+    if root not in candidate.parents:
+        raise AppError(400, "图片路径不合法")
+    return candidate
 
 
 def parse_cookies(header):

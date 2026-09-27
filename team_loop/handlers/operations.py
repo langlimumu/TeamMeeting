@@ -1,6 +1,21 @@
 import re
+import uuid
 
 from ..permissions import *
+
+
+def norm_image_ids_in(content):
+    """Image ids referenced by `[[img:<id>]]` markers, deduped in first-appearance order.
+
+    The marker carries a server-issued integer and nothing else — no URL, no HTML — which
+    is what keeps the clause body renderable without reaching for `innerHTML`.
+    """
+    ids = []
+    for raw in re.findall(NORM_IMAGE_MARKER, str(content or "")):
+        image_id = int(raw)
+        if image_id not in ids:
+            ids.append(image_id)
+    return ids
 
 
 DUTY_DEFAULT_START = "08:30"
@@ -2052,23 +2067,92 @@ class OperationsHandlerMixin:
         team_name = (get_setting_value(conn, "app_team_name", "") or "").strip()
         return f"{team_name}规范" if team_name else "团队规范"
 
+    def can_delete_norm_category(self, category, user):
+        """目录归属：自己建的自己可以删，管理员可以删任何目录。
+
+        预置分类由系统播种，created_by 为空，只有管理员能删——它们不是"没人建的"，而是
+        "全团队共用的"，不该被第一个想整理目录的人顺手删掉。
+        """
+        if not user:
+            return False
+        if user.get("role") == "admin":
+            return True
+        return int(category["created_by"] or 0) == int(user["id"])
+
+    def can_rename_norm_category(self, category, user):
+        """改名跟删除同源：都是"我建的东西我自己管"，管理员兜底。
+
+        刻意不做成管理员专属——创建人连自己刚打错的目录名都改不了，只能删了重建，而带着
+        条款的目录根本删不掉（非空目录 409），等于把自己锁死。规则与 can_delete 逐字相同，
+        免得同一行上出现"改名可以、删除不行"这种看着像 bug 的组合。
+        """
+        return self.can_delete_norm_category(category, user)
+
     def list_norm_categories(self):
         user = getattr(self, "api_user", None)
         with connect() as conn:
             where, params = self.organization_current_entity_filter(conn, "c.org_unit_id", user)
-            return rows_to_list(
+            rows = rows_to_list(
                 conn.execute(
                     f"""
-                    SELECT c.*,
+                    SELECT c.*, u.display_name AS created_by_name,
                            (SELECT COUNT(*) FROM norms n
-                             WHERE n.category_id=c.id AND n.deleted_at IS NULL) AS norm_count
+                             WHERE n.category_id=c.id AND n.deleted_at IS NULL) AS norm_count,
+                           (SELECT COUNT(*) FROM norm_categories ch
+                             WHERE ch.parent_id=c.id) AS child_count
                     FROM norm_categories c
+                    LEFT JOIN norm_categories p ON p.id=c.parent_id
+                    LEFT JOIN users u ON u.id=c.created_by
                     WHERE {where}
-                    ORDER BY c.sort_order, c.id
+                    ORDER BY COALESCE(p.sort_order, c.sort_order), c.parent_id IS NOT NULL, c.sort_order, c.id
                     """,
                     params,
                 ).fetchall()
             )
+        # can_delete / can_rename 由后端算：前端只画"点下去真会成功"的按钮，规则不重复实现。
+        for row in rows:
+            row["can_delete"] = self.can_delete_norm_category(row, user)
+            row["can_rename"] = self.can_rename_norm_category(row, user)
+        return rows
+
+    def norm_category_name_taken(self, conn, org_unit_id, parent_id, name, exclude_id=None):
+        """Duplicate names are scoped to the same parent shelf, not to the whole team."""
+        sql = """
+            SELECT id FROM norm_categories
+            WHERE org_unit_id=? AND COALESCE(parent_id, 0)=? AND name=?
+        """
+        params = [org_unit_id, parent_id or 0, name]
+        if exclude_id:
+            sql += " AND id<>?"
+            params.append(exclude_id)
+        return conn.execute(sql, params).fetchone()
+
+    def resolve_norm_parent(self, conn, raw_value, org_unit_id, category_id=None):
+        """Resolve the optional parent shelf; empty or 0 means a top-level category.
+
+        The tree is capped at two levels, so a parent must itself be top-level. Without this
+        guard a sub-shelf could be nested under another sub-shelf and produce a third level
+        that neither the navigation nor the per-category documents model.
+        """
+        if raw_value in (None, "", 0, "0"):
+            return None
+        try:
+            parent_id = int(raw_value)
+        except (TypeError, ValueError):
+            raise AppError(400, "上级目录参数不正确")
+        if category_id and parent_id == int(category_id):
+            raise AppError(400, "不能把目录挂到自己下面")
+        parent = conn.execute(
+            "SELECT id, name, parent_id, active FROM norm_categories WHERE id=? AND org_unit_id=?",
+            (parent_id, org_unit_id),
+        ).fetchone()
+        if not parent:
+            raise AppError(404, "上级目录不存在")
+        if parent["parent_id"]:
+            raise AppError(400, f"「{parent['name']}」已经是二级目录，规范分类最多两级")
+        if not parent["active"]:
+            raise AppError(400, f"上级目录「{parent['name']}」已停用，请选择其他目录")
+        return parent_id
 
     def require_current_org_unit_id(self, conn, user, purpose):
         context = self.organization_context(conn, user)
@@ -2078,7 +2162,11 @@ class OperationsHandlerMixin:
         return org_unit_id
 
     def create_norm_category(self):
-        admin = self.require_admin()
+        """任何能进「团队规范」的登录用户都可以建目录（一级或二级）。
+
+        模块级 create 权限在路由层已经把访客挡在外面，这里记下创建人，供后续删除时判断归属。
+        """
+        actor = getattr(self, "api_user", None) or self.current_user()
         data = read_json(self)
         name = (data.get("name") or "").strip()
         if not name:
@@ -2087,51 +2175,71 @@ class OperationsHandlerMixin:
             raise AppError(400, "分类名称不超过 24 字")
         description = (data.get("description") or "").strip()
         with connect() as conn:
-            org_unit_id = self.require_current_org_unit_id(conn, admin, "新增规范分类")
-            exists = conn.execute(
-                "SELECT id FROM norm_categories WHERE org_unit_id=? AND name=?",
-                (org_unit_id, name),
-            ).fetchone()
-            if exists:
-                raise AppError(409, f"分类「{name}」已存在")
+            org_unit_id = self.require_current_org_unit_id(conn, actor, "新增规范分类")
+            parent_id = self.resolve_norm_parent(conn, data.get("parent_id"), org_unit_id)
+            if self.norm_category_name_taken(conn, org_unit_id, parent_id, name):
+                raise AppError(409, f"该层级下已有分类「{name}」")
             sort_order = conn.execute(
-                "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM norm_categories WHERE org_unit_id=?",
-                (org_unit_id,),
+                """
+                SELECT COALESCE(MAX(sort_order), 0) + 1 FROM norm_categories
+                WHERE org_unit_id=? AND COALESCE(parent_id, 0)=?
+                """,
+                (org_unit_id, parent_id or 0),
             ).fetchone()[0]
             cursor = conn.execute(
                 """
-                INSERT INTO norm_categories(org_unit_id, name, description, sort_order, active, created_at)
-                VALUES(?,?,?,?,1,?)
+                INSERT INTO norm_categories(org_unit_id, parent_id, name, description, sort_order, active, created_by, created_at)
+                VALUES(?,?,?,?,?,1,?,?)
                 """,
-                (org_unit_id, name, description, sort_order, now_iso()),
+                (org_unit_id, parent_id, name, description, sort_order, actor["id"], now_iso()),
             )
-            write_audit(conn, admin, "norm_category.create", "norm_category", cursor.lastrowid, "规范分类已新增", {"name": name}, self.client_address[0])
+            write_audit(conn, actor, "norm_category.create", "norm_category", cursor.lastrowid, "规范分类已新增", {"name": name, "parent_id": parent_id}, self.client_address[0])
         return {"message": "分类已新增", "categories": self.list_norm_categories()}
 
     def update_norm_category(self, category_id):
-        admin = self.require_admin()
+        """改名：创建人改自己建的，管理员改任何目录。
+
+        「换上级目录」与「停用」仍然只有管理员能做——这两件动的是"目录摆在哪、别人还能
+        不能看到这份文档"，跟"给我自己建的东西换个名字"不是一回事，所以留在右侧管理面板，
+        不跟着改名一起下放。
+        """
+        actor = getattr(self, "api_user", None) or self.current_user()
         data = read_json(self)
         with connect() as conn:
-            org_unit_id = self.require_current_org_unit_id(conn, admin, "维护规范分类")
+            org_unit_id = self.require_current_org_unit_id(conn, actor, "维护规范分类")
             category = conn.execute(
                 "SELECT * FROM norm_categories WHERE id=? AND org_unit_id=?",
                 (category_id, org_unit_id),
             ).fetchone()
             if not category:
                 raise AppError(404, "规范分类不存在")
+            if not self.can_rename_norm_category(category, actor):
+                raise AppError(403, "只能修改自己创建的目录，其他目录请联系管理员处理")
+            is_admin = bool(actor and actor.get("role") == "admin")
+            # 非管理员只能碰名字和说明；带上层级/停用字段一律拒绝，不静默忽略——
+            # 静默忽略会让人以为"我点过停用了"，而实际什么都没发生。
+            if not is_admin and ("parent_id" in data or "active" in data):
+                raise AppError(403, "只有管理员能调整目录层级或停用目录")
             name = (data.get("name") or category["name"]).strip()
             if not name:
                 raise AppError(400, "请填写分类名称")
             if len(name) > 24:
                 raise AppError(400, "分类名称不超过 24 字")
-            if name != category["name"]:
-                duplicate = conn.execute(
-                    "SELECT id FROM norm_categories WHERE org_unit_id=? AND name=? AND id<>?",
-                    (org_unit_id, name, category_id),
-                ).fetchone()
-                if duplicate:
-                    raise AppError(409, f"分类「{name}」已存在")
-            description = (data.get("description") or "").strip()
+            parent_id = category["parent_id"]
+            if "parent_id" in data:
+                parent_id = self.resolve_norm_parent(conn, data.get("parent_id"), org_unit_id, category_id)
+                children = conn.execute(
+                    "SELECT COUNT(*) FROM norm_categories WHERE parent_id=?",
+                    (category_id,),
+                ).fetchone()[0]
+                if children and parent_id is not None:
+                    raise AppError(409, f"「{category['name']}」下还有 {children} 个子目录，移进去会变成三级目录")
+            if name != category["name"] or parent_id != category["parent_id"]:
+                if self.norm_category_name_taken(conn, org_unit_id, parent_id, name, category_id):
+                    raise AppError(409, f"该层级下已有分类「{name}」")
+            # 只改名字的 PATCH 不带 description，这时要保留原值，否则改个名会把说明清空。
+            raw_description = data["description"] if "description" in data else category["description"]
+            description = str(raw_description or "").strip()
             active = 1 if str(data.get("active", category["active"])).lower() not in {"0", "false", "no"} else 0
             if not active and category["active"]:
                 used = conn.execute(
@@ -2140,23 +2248,38 @@ class OperationsHandlerMixin:
                 ).fetchone()[0]
                 if used:
                     raise AppError(409, f"该分类下还有 {used} 条规范，请先移动到其他分类再停用")
+                children = conn.execute(
+                    "SELECT COUNT(*) FROM norm_categories WHERE parent_id=?",
+                    (category_id,),
+                ).fetchone()[0]
+                if children:
+                    raise AppError(409, f"「{category['name']}」下还有 {children} 个子目录，请先移走子目录再停用")
             conn.execute(
-                "UPDATE norm_categories SET name=?, description=?, active=? WHERE id=?",
-                (name, description, active, category_id),
+                "UPDATE norm_categories SET name=?, description=?, active=?, parent_id=? WHERE id=?",
+                (name, description, active, parent_id, category_id),
             )
-            write_audit(conn, admin, "norm_category.update", "norm_category", category_id, "规范分类已更新", {"name": name, "active": active}, self.client_address[0])
+            write_audit(conn, actor, "norm_category.update", "norm_category", category_id, "规范分类已更新", {"name": name, "active": active, "parent_id": parent_id}, self.client_address[0])
         return {"message": "分类已更新", "categories": self.list_norm_categories()}
 
     def delete_norm_category(self, category_id):
-        admin = self.require_admin()
+        """本人建的目录本人可以删，管理员可以删任何目录（含系统预置分类）。"""
+        actor = getattr(self, "api_user", None) or self.current_user()
         with connect() as conn:
-            org_unit_id = self.require_current_org_unit_id(conn, admin, "删除规范分类")
+            org_unit_id = self.require_current_org_unit_id(conn, actor, "删除规范分类")
             category = conn.execute(
                 "SELECT * FROM norm_categories WHERE id=? AND org_unit_id=?",
                 (category_id, org_unit_id),
             ).fetchone()
             if not category:
                 raise AppError(404, "规范分类不存在")
+            if not self.can_delete_norm_category(category, actor):
+                raise AppError(403, "只能删除自己创建的目录，其他目录请联系管理员处理")
+            children = conn.execute(
+                "SELECT COUNT(*) FROM norm_categories WHERE parent_id=?",
+                (category_id,),
+            ).fetchone()[0]
+            if children:
+                raise AppError(409, f"「{category['name']}」下还有 {children} 个子目录，请先删除或移走子目录")
             used = conn.execute(
                 "SELECT COUNT(*) FROM norms WHERE category_id=? AND deleted_at IS NULL",
                 (category_id,),
@@ -2164,7 +2287,7 @@ class OperationsHandlerMixin:
             if used:
                 raise AppError(409, f"该分类下还有 {used} 条规范，请先移动到其他分类再删除")
             conn.execute("DELETE FROM norm_categories WHERE id=?", (category_id,))
-            write_audit(conn, admin, "norm_category.delete", "norm_category", category_id, "规范分类已删除", {"name": category["name"]}, self.client_address[0])
+            write_audit(conn, actor, "norm_category.delete", "norm_category", category_id, "规范分类已删除", {"name": category["name"]}, self.client_address[0])
         return {"message": "分类已删除", "categories": self.list_norm_categories()}
 
     def list_norms(self, query):
@@ -2193,12 +2316,15 @@ class OperationsHandlerMixin:
                 conn.execute(
                     f"""
                     SELECT n.*, u.display_name AS created_by_name,
-                           c.name AS category_name, c.sort_order AS category_order
+                           c.name AS category_name, c.sort_order AS category_order,
+                           c.parent_id AS category_parent_id, pc.name AS category_parent_name
                     FROM norms n
                     LEFT JOIN users u ON u.id=n.created_by
                     LEFT JOIN norm_categories c ON c.id=n.category_id
+                    LEFT JOIN norm_categories pc ON pc.id=c.parent_id
                     WHERE {' AND '.join(clauses)}
-                    ORDER BY COALESCE(c.sort_order, 9999), n.sort_order, n.id
+                    ORDER BY COALESCE(pc.sort_order, c.sort_order, 9999), c.parent_id IS NOT NULL,
+                             COALESCE(c.sort_order, 9999), n.sort_order, n.id
                     """,
                     params,
                 ).fetchall()
@@ -2276,7 +2402,9 @@ class OperationsHandlerMixin:
                     now_iso(), now_iso(),
                 ),
             )
-            write_audit(conn, actor, "norm.create", "norm", cursor.lastrowid, "团队规范条目已记录", {"title": title, "category_id": category_id}, self.client_address[0])
+            norm_id = cursor.lastrowid
+            self.bind_norm_images(conn, norm_id, org_unit_id, content)
+            write_audit(conn, actor, "norm.create", "norm", norm_id, "团队规范条目已记录", {"title": title, "category_id": category_id}, self.client_address[0])
         return {"message": "规范已记入文档", "norms": self.list_norms({})}
 
     def update_norm(self, norm_id, user=None):
@@ -2324,6 +2452,7 @@ class OperationsHandlerMixin:
                     status, effective_from, effective_to, actor["id"], now_iso(), norm_id,
                 ),
             )
+            self.bind_norm_images(conn, norm_id, norm["org_unit_id"], content)
             write_audit(conn, actor, "norm.update", "norm", norm_id, "团队规范条目已更新", {"title": title, "status": status}, self.client_address[0])
         return {"message": "规范已更新", "norms": self.list_norms({})}
 
@@ -2354,16 +2483,32 @@ class OperationsHandlerMixin:
         document instead of carrying the category index as a prefix. Every category is
         listed even when empty, because the navigation mirrors the shelves the team
         maintains.
+
+        Categories may sit two levels deep. A sub-shelf is a shelf of its own, not a
+        section of its parent: the parent document shows only the clauses filed directly
+        under it, so filing a rule under `python研发流程` never leaks it into
+        `研发流程`. The tree order is inherited from the shelves so the navigation can
+        rebuild the nesting from `parent_id` alone.
+
+        This document is the only place norms are read and edited — there is no separate
+        entry list — so each article carries `status` (to fill the edit form) and
+        `can_edit` (author plus administrators, from the same `can_edit_norm` that
+        `update_norm` enforces) so the client can draw an edit button without re-deriving
+        the ownership rule.
         """
         org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
         cat_where, cat_params = self.organization_current_entity_filter(conn, "c.org_unit_id", user)
         categories = rows_to_list(
             conn.execute(
                 f"""
-                SELECT id, name, description, sort_order
+                SELECT c.id, c.parent_id, c.name, c.description, c.sort_order,
+                       c.created_by, u.display_name AS created_by_name,
+                       (SELECT COUNT(*) FROM norm_categories ch WHERE ch.parent_id=c.id) AS child_count
                 FROM norm_categories c
+                LEFT JOIN norm_categories p ON p.id=c.parent_id
+                LEFT JOIN users u ON u.id=c.created_by
                 WHERE {cat_where}
-                ORDER BY c.sort_order, c.id
+                ORDER BY COALESCE(p.sort_order, c.sort_order), c.parent_id IS NOT NULL, c.sort_order, c.id
                 """,
                 cat_params,
             ).fetchall()
@@ -2372,7 +2517,7 @@ class OperationsHandlerMixin:
             conn.execute(
                 f"""
                 SELECT n.id, n.category_id, n.title, n.content, n.scope, n.source, n.status,
-                       n.effective_from, n.effective_to, n.sort_order, n.created_at,
+                       n.effective_from, n.effective_to, n.sort_order, n.created_at, n.created_by,
                        u.display_name AS created_by_name
                 FROM norms n
                 LEFT JOIN users u ON u.id=n.created_by
@@ -2383,18 +2528,50 @@ class OperationsHandlerMixin:
                 [*org_params, today_iso()],
             ).fetchall()
         )
+        images_by_norm = {}
+        article_ids = [row["id"] for row in articles]
+        if article_ids:
+            placeholders = ",".join("?" for _ in article_ids)
+            for row in rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT id, norm_id, filename, mime_type, byte_size, caption, created_at
+                    FROM norm_images
+                    WHERE deleted_at IS NULL AND norm_id IN ({placeholders})
+                    ORDER BY norm_id, id
+                    """,
+                    article_ids,
+                ).fetchall()
+            ):
+                # `?v=` makes the URL change whenever the row is rewritten, so the long
+                # cache lifetime below cannot serve a stale picture.
+                version = "".join(ch for ch in str(row.get("created_at") or "") if ch.isdigit())
+                row["url"] = f"/api/norm-images/{row['id']}?v={version or row['id']}"
+                images_by_norm.setdefault(row["norm_id"], []).append(row)
         grouped = {}
         for row in articles:
             grouped.setdefault(row["category_id"], []).append(row)
-        buckets = [
-            (category["id"], category["name"], category["description"] or "")
-            for category in categories
-        ]
+        by_id = {category["id"]: category for category in categories}
+        buckets = list(categories)
         known = {category["id"] for category in categories}
         if any(row["category_id"] not in known for row in articles):
-            buckets.append((None, NORM_OTHER_CHAPTER_NAME, "尚未归入分类的规范条目"))
+            buckets.append(
+                {
+                    "id": None,
+                    "parent_id": None,
+                    "name": NORM_OTHER_CHAPTER_NAME,
+                    "description": "尚未归入分类的规范条目",
+                    "child_count": 0,
+                    "created_by": None,
+                    "created_by_name": "",
+                }
+            )
         documents = []
-        for category_id, name, description in buckets:
+        for category in buckets:
+            category_id = category["id"]
+            name = category["name"]
+            description = category["description"] or ""
+            parent = by_id.get(category["parent_id"]) if category.get("parent_id") else None
             chapter = {"name": name, "description": description, "articles": []}
             for article_index, row in enumerate(grouped.get(category_id) or [], start=1):
                 chapter["articles"].append(
@@ -2405,19 +2582,33 @@ class OperationsHandlerMixin:
                         "content": row["content"] or "",
                         "scope": row["scope"] or "",
                         "source": row["source"] or "",
+                        "status": row["status"],
                         "effective_from": row["effective_from"] or "",
                         "effective_to": row["effective_to"] or "",
                         "created_by_name": row["created_by_name"] or "",
                         "created_at": row["created_at"],
+                        # 谁能改这条：作者本人 + 管理员。规则和后端 update_norm 用的是同一个
+                        # can_edit_norm()，前端只按这个标记画"编辑"按钮，不拿 created_by 再算一遍。
+                        "can_edit": self.can_edit_norm(row, user),
+                        # 正文里的 [[img:id]] 标记靠这张表还原成图片；表里没有的 id 说明
+                        # 图片已失效，前端据此不画裂图。
+                        "images": images_by_norm.get(row["id"], []),
                     }
                 )
             title = name if name.endswith("规范") else f"{name}规范"
             documents.append(
                 {
                     "category_id": category_id,
+                    "parent_id": category.get("parent_id"),
+                    "parent_name": parent["name"] if parent else "",
+                    "level": 2 if parent else 1,
+                    "child_count": int(category.get("child_count") or 0),
                     "name": name,
                     "description": description,
                     "title": title,
+                    "created_by_name": category.get("created_by_name") or "",
+                    "can_delete": self.can_delete_norm_category(category, user),
+                    "can_rename": self.can_rename_norm_category(category, user),
                     "article_count": len(chapter["articles"]),
                     "chapters": [chapter],
                     "markdown": build_norm_markdown(title, [chapter]),
@@ -2459,5 +2650,152 @@ class OperationsHandlerMixin:
                 },
             }
         return {"document": document}
+
+    def store_norm_image_file(self, image):
+        """Write the bytes under `uploads/norms/YYYY/MM/` and return the relative path.
+
+        The stored name is generated here and never derived from the upload: the original
+        filename is kept in the database for display only, so nothing a user types can
+        reach the filesystem. Splitting by month keeps any one directory small.
+        """
+        stamp = dt.datetime.now()
+        extension = NORM_IMAGE_TYPES[image["mime_type"]][1]
+        relative = f"norms/{stamp:%Y/%m}/{uuid.uuid4().hex}{extension}"
+        target = norm_upload_path(relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(image["data"])
+        return relative
+
+    def sweep_staged_norm_images(self, conn, keep_hours=24):
+        """Drop images that were uploaded but never referenced by a saved clause.
+
+        Runs opportunistically on upload rather than on a timer: abandoning an upload is
+        the only thing that creates a staged image, so that is exactly when it is cheapest
+        to notice. A file that cannot be removed must not block the upload — the row goes
+        either way, otherwise the sweep would retry it on every future upload forever.
+        """
+        cutoff = (dt.datetime.now() - dt.timedelta(hours=keep_hours)).replace(microsecond=0).isoformat()
+        staged = rows_to_list(
+            conn.execute(
+                """
+                SELECT id, stored_path FROM norm_images
+                WHERE deleted_at IS NULL AND norm_id IS NULL AND created_at < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+        )
+        for row in staged:
+            try:
+                path = norm_upload_path(row["stored_path"])
+                if path.is_file():
+                    path.unlink()
+            except (OSError, AppError):
+                pass
+            conn.execute("DELETE FROM norm_images WHERE id=?", (row["id"],))
+
+    def create_norm_image(self, user=None):
+        """Stage one illustration for a clause. It is bound when the clause is saved."""
+        actor = user or self.current_user()
+        image = decode_norm_image(read_json(self))
+        with connect() as conn:
+            org_unit_id = self.require_current_org_unit_id(conn, actor, "上传规范插图")
+            stored_path = self.store_norm_image_file(image)
+            cursor = conn.execute(
+                """
+                INSERT INTO norm_images(org_unit_id, stored_path, filename, mime_type, byte_size,
+                                        created_by, created_at)
+                VALUES(?,?,?,?,?,?,?)
+                """,
+                (
+                    org_unit_id, stored_path, image["filename"], image["mime_type"],
+                    len(image["data"]), actor["id"], now_iso(),
+                ),
+            )
+            image_id = cursor.lastrowid
+            self.sweep_staged_norm_images(conn)
+            write_audit(
+                conn, actor, "norm_image.upload", "norm_image", image_id, "规范插图已上传",
+                {"filename": image["filename"], "byte_size": len(image["data"])},
+                self.client_address[0],
+            )
+        return {
+            "message": "图片已插入",
+            "image": {
+                "id": image_id,
+                "url": f"/api/norm-images/{image_id}",
+                "filename": image["filename"],
+                "byte_size": len(image["data"]),
+                "marker": f"[[img:{image_id}]]",
+            },
+        }
+
+    def require_norm_image_visible(self, conn, image, user):
+        """Reuse the organization-scope filter rather than restating the visibility rule."""
+        org_where, org_params = self.organization_current_entity_filter(conn, "i.org_unit_id", user)
+        visible = conn.execute(
+            f"SELECT 1 FROM norm_images i WHERE i.id=? AND {org_where}",
+            [image["id"], *org_params],
+        ).fetchone()
+        if not visible:
+            raise AppError(403, "无权查看该图片")
+
+    def read_norm_image(self, image_id, user):
+        """Return (row, bytes) for one illustration, after the module and scope checks.
+
+        Served through its own route on purpose: the static handler performs no auth at
+        all, and its `no-store` header would re-send every picture on every scroll.
+        """
+        with connect() as conn:
+            image = conn.execute(
+                """
+                SELECT id, norm_id, org_unit_id, stored_path, filename, mime_type, byte_size
+                FROM norm_images
+                WHERE id=? AND deleted_at IS NULL
+                """,
+                (image_id,),
+            ).fetchone()
+            if not image:
+                raise AppError(404, "图片不存在")
+            self.require_norm_image_visible(conn, image, user)
+        path = norm_upload_path(image["stored_path"])
+        if not path.is_file():
+            raise AppError(404, "图片文件已不存在")
+        return image, path.read_bytes()
+
+    def bind_norm_images(self, conn, norm_id, org_unit_id, content):
+        """Re-point the illustrations a clause references and release the ones it dropped.
+
+        Uploading only stages an image; saving the clause is what makes it count, so a user
+        who uploads and then cancels leaves nothing behind but a staged row the sweep
+        collects. Dropped images are released rather than deleted, so pasting a marker back
+        keeps working; whatever stays unreferenced is swept once the window passes.
+        """
+        image_ids = norm_image_ids_in(content)
+        if len(image_ids) > NORM_IMAGE_MAX_PER_NORM:
+            raise AppError(400, f"单条规范最多插入 {NORM_IMAGE_MAX_PER_NORM} 张图片")
+        if not image_ids:
+            conn.execute("UPDATE norm_images SET norm_id=NULL WHERE norm_id=?", (norm_id,))
+            return
+        placeholders = ",".join("?" for _ in image_ids)
+        available = {
+            row["id"]
+            for row in conn.execute(
+                f"""
+                SELECT id FROM norm_images
+                WHERE deleted_at IS NULL AND org_unit_id=? AND id IN ({placeholders})
+                """,
+                [org_unit_id, *image_ids],
+            ).fetchall()
+        }
+        if any(image_id not in available for image_id in image_ids):
+            raise AppError(400, "正文里有图片已失效，请重新插入后再保存")
+        conn.execute(
+            f"UPDATE norm_images SET norm_id=? WHERE id IN ({placeholders})",
+            [norm_id, *image_ids],
+        )
+        conn.execute(
+            f"UPDATE norm_images SET norm_id=NULL WHERE norm_id=? AND id NOT IN ({placeholders})",
+            [norm_id, *image_ids],
+        )
 
 
