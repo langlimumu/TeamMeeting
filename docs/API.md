@@ -235,9 +235,9 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET/POST | `/api/norm-categories` | 规范分类（目录）；POST 可带 `parent_id` 建子目录 |
-| PATCH/DELETE | `/api/norm-categories/{id}` | 改名、改上级、停用（仅管理员）或删除（创建人或管理员）分类 |
-| GET/POST | `/api/norms` | 规范条目；查询支持 `category_id`、`q`、`include_abolished`。规范页读取已改走 `/api/norms/document`，这个接口保留给其它调用方与增删改的返回值 |
-| PATCH/DELETE | `/api/norms/{id}` | 修改或软删除条目 |
+| PATCH/DELETE | `/api/norm-categories/{id}` | 改名（创建人或管理员）、改上级 / 停用（仅管理员，**界面无入口**）或删除（创建人或管理员）分类 |
+| GET/POST | `/api/norms` | 规范条目；查询支持 `category_id` 与关键词 `q`。规范页正文读取已改走 `/api/norms/document`，此接口现在主要供给文档区搜索框与增删改的返回值 |
+| PATCH/DELETE | `/api/norms/{id}` | 修改或软删除条目。`PATCH` 限作者本人 + 管理员；`DELETE` 归属同源（作者本人 + 管理员），非作者返回 403 |
 | GET | `/api/norms/document` | 全部分类文档：每个分类一份，各自带 Markdown |
 | POST | `/api/norm-images` | 上传正文插图（JSON + base64 data URL），只暂存、不绑定 |
 | GET | `/api/norm-images/{id}` | 取插图二进制；**不走静态目录**，见下 |
@@ -256,20 +256,20 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | 查看目录与文档 | 所有人，含未登录访客 | `norms` 的 `can_view`；访客类型默认只读 |
 | 新增目录（POST） | 任何登录用户，其用户类型对 `norms` 有 `can_create` | 路由层 `require_module(..., "create")`；未登录 → **401** |
 | 改名（PATCH，只发 `name`） | 创建人本人；管理员可改任何目录（含系统预置） | handler 内按 `created_by` 判定；越权 → **403** |
-| 改上级 / 停用（PATCH 带 `parent_id` / `active`） | 仅管理员 | 同一个 handler；非管理员带上这两个字段 → **403** |
+| 改上级 / 停用（PATCH 带 `parent_id` / `active`） | 仅管理员 | 同一个 handler；非管理员带上这两个字段 → **403**。界面已无入口，能力只在 API 层 |
 | 删除目录（DELETE） | 创建人本人；管理员可删任何目录（含系统预置） | handler 内按 `created_by` 判定；越权 → **403** |
 
 两处容易踩的地方：
 
 - **目录的 DELETE 不按模块的 `can_delete` 放行**。路由层把 `/api/norm-categories/` 的 `DELETE` 显式映射成 `edit` 动作过模块闸门，真正的归属判断在 `delete_norm_category` 里按 `created_by` 做。原因是模块表只能表达「这个类型能不能删这个模块」，表达不了「同类型用户之间只能删自己建的」；若照旧用 `can_delete`，一个普通成员要么被整模块拦死，要么被放行后删掉别人的目录。改名同理：`PATCH` 在路由层本就是 `edit` 动作，归属判断在 handler 里由 `can_rename_norm_category()` 做——它与 `can_delete_norm_category()` 是同一条规则，刻意保持一致，免得同一行上出现「能改名、不能删」这种看着像 bug 的组合。
-- **「改上级目录」和「停用」没有跟着改名一起下放**，仍然只有管理员能做。这两件动的是「目录摆在哪、别人还能不能看到这份文档」，跟「给我自己建的东西换个名字」不是一回事。非管理员在 `PATCH` 里带上 `parent_id` 或 `active` 会收到 **403**，而不是被静默忽略——静默忽略会让人以为改生效了。
+- **「改上级目录」和「停用」没有跟着改名一起下放**，仍然只有管理员能做。这两件动的是「目录摆在哪、别人还能不能看到这份文档」，跟「给我自己建的东西换个名字」不是一回事。非管理员在 `PATCH` 里带上 `parent_id` 或 `active` 会收到 **403**，而不是被静默忽略——静默忽略会让人以为改生效了。**这两个操作在界面上已经没有入口**（原先挂在右侧「规范分类」面板），能力保留在 API 与 handler 里。
 - **`can_delete` / `can_rename` 由后端算好下发**，前端只负责画按钮 / 放行双击、不加判断逻辑（`list_norm_categories` 与 `GET /api/norms/document` 的每份文档都会带上）。这样「谁不能删、谁不能改名」只有一处实现。**但有一个例外要记住**：管理员在「以某类型视角预览」时，服务端仍以管理员身份算这两个标记（返回 `true`），而预览是纯前端的。归属是「具体某个人建的」、无法从一个**用户类型**推出，所以前端在预览模式下**一律不放行删除和改名**（`canCreateNormCategory` 的 `＋` 仍按被预览类型的 `create` 权限决定）。这是有意的收敛：宁可让预览看到最保守的一面，也不要把管理员身份漏进预览。
 
 文档按分类拆分为多份，`GET /api/norms/document` 一次返回全部：
 
 - `documents`：数组，每个分类一项，含 `category_id`（未归类的桶为 `null`）、`parent_id`、`parent_name`、`level`（`1` 或 `2`）、`child_count`、`name`、`description`、`title`（`{分类名}规范`）、`created_by_name`、`can_delete`、`can_rename`、`article_count`、`chapters`（单元素数组）与 `markdown`。数组顺序同样是树序，前端靠 `parent_id` 还原缩进。左侧目录行尾的「×」按 `can_delete` 画，`can_rename` 则决定**双击目录名**能不能进就地改名态（改名没有按钮）。
-- `chapters[].articles[]`：每条条款含 `no`（份内序号）、`id`、`title`、`content`、`scope`、`source`、`status`、`effective_from`、`effective_to`、`created_by_name`、`created_at`、`can_edit` 与 `images`。**文档是规范页唯一的读取与编辑入口**（页面上不再有独立的条目列表），所以条款要自带这两样：`can_edit` 由 `can_edit_norm()` 算好下发（作者本人 + 管理员，与 `update_norm` 用的是同一个函数），前端只画按钮、不重新实现归属规则；`status` 供编辑表单回填。
-- `stats`：`total` / `active` / `pending` / `abolished` / `category_count`。
+- `chapters[].articles[]`：每条条款含 `no`（份内序号）、`id`、`title`、`content`、`scope`、`source`、`created_by_name`、`created_at`、`can_edit`、`can_delete` 与 `images`。**文档是规范页唯一的读取与编辑入口**（页面上不再有独立的条目列表），所以条款要自带这两样归属标记：`can_edit` 由 `can_edit_norm()` 算好下发（作者本人 + 管理员，与 `update_norm` 用的是同一个函数），`can_delete` 由 `can_delete_norm()` 算好下发（委托前者，与目录删除同源），前端只按标记画按钮、不重新实现归属规则。
+- `stats`：`total` / `category_count`。
 
 **父目录文档只含直属条款**：把条款记在「python研发流程」下，不会出现在「研发流程」那份文档里。父子各是一份独立文档，`parent_id` 只影响导航缩进与管理列表分组。
 
@@ -288,11 +288,13 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 
 未引入版本概念：文档是 `norms` 表的实时投影，随手记或修改后立即重排，没有草稿/正式版之分，也没有快照。`norm_doc_versions` 表保留在建表语句中，但当前没有任何接口读写它。
 
-进入文档的条件是 `status='active'` 且（`effective_to` 为空或 ≥ 今天）；`pending`（管理员复核标记）与 `abolished` 都不进文档。**空分类也会保留一份空文档**，让导航与「规范分类」一一对应，不会出现"刚建的分类不见了"。
+条款只有**存在**与**已删除**两态：没有生效 / 失效日期，也没有状态字段参与过滤，只要 `deleted_at IS NULL` 就进文档——**记下来即生效**。删除是软删除并进入回收站（`entity_type` 为 `norm`，归属判定见上），从回收站恢复后原样回到文档，编号按当前顺序重排。**空分类也会保留一份空文档**，让导航与目录一一对应，不会出现"刚建的分类不见了"。
 
-⚠️ **一个已知的口径后果**：页面上没有独立条目列表，把条款改成 `abolished` / `pending` 后它会立刻退出文档，界面上就没有入口改回来了（数据还在，可用 `PATCH /api/norms/{id}` 把 `status` 改回去；回收站只覆盖软删除的 `deleted_at`）。要恢复"先藏起来、之后还能翻出来"的能力，可以给文档接口加一个 `include_abolished` 开关——这是有意留在后面的，不是漏了。
+**文档区搜索**：`GET /api/norms?q=关键词` 对标题 / 内容 / 适用范围 / 来源四个字段做 LIKE 匹配，命中条目额外带 `category_name`，供文档头部的搜索框用。搜索是跨目录的，命中后切到该条目所在的目录并高亮，避免用户自己一份份翻。
 
-分类下仍有未删除条目时，停用与删除分类都会返回 409，避免条款从文档中凭空消失。删除条目走软删除并进入回收站（`entity_type` 为 `norm`）。
+⚠️ **删掉状态与日期过滤后的口径**：`norms` 表上的 `status` / `effective_from` / `effective_to` 列**保留在建表语句里**（历史数据仍在），但不再被任何读取路径使用，也不再由写入接口设置——`create_norm` / `update_norm` 无条件写 `status='active'`、日期留空，`assemble_norm_documents` 不再按它们过滤。旧库里那些 `abolished` / `pending` / 已过期的行因此**全部重新进入文档**，这正是「添加即生效、删除即失效」想要的效果。**不要再给文档接口加 `include_abolished` 之类的开关**，两态模型下没有"藏起来"这个中间态，想隐藏只能删除（进回收站、可恢复）。
+
+分类下仍有未删除条目时，删除分类会返回 409，避免条款从文档中凭空消失（`PATCH` 停用同一分类同样返回 409）。删除条目走软删除并进入回收站（`entity_type` 为 `norm`）。
 
 ## 11. 扩展 API 的检查项
 

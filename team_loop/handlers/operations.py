@@ -53,33 +53,6 @@ def duty_hours(start_time, end_time):
 NORM_OTHER_CHAPTER_NAME = "其他"
 
 
-def parse_norm_date(value, label):
-    """Normalize an optional ISO date, returning None when blank."""
-    text = str(value or "").strip()[:10]
-    if not text:
-        return None
-    try:
-        dt.date.fromisoformat(text)
-    except ValueError:
-        raise AppError(400, f"{label}格式不正确：{value}")
-    return text
-
-
-def norm_state(row):
-    """Effective state of one norm: active / scheduled / expired / pending / abolished."""
-    status = str(row.get("status") or "active")
-    if status == "abolished":
-        return "abolished"
-    if status == "pending":
-        return "pending"
-    today = today_iso()
-    if row.get("effective_to") and str(row["effective_to"]) < today:
-        return "expired"
-    if row.get("effective_from") and str(row["effective_from"]) > today:
-        return "scheduled"
-    return "active"
-
-
 def build_norm_markdown(title, chapters, extra_lines=None):
     """Render one category document into plain Markdown."""
     chapters = chapters or []
@@ -114,8 +87,6 @@ def build_norm_markdown(title, chapters, extra_lines=None):
                 details.append(f"适用范围：{article['scope']}")
             if article.get("source"):
                 details.append(f"来源：{article['source']}")
-            if article.get("effective_from"):
-                details.append(f"生效日期：{article['effective_from']}")
             if article.get("created_by_name"):
                 details.append(f"记录人：{article['created_by_name']}")
             if details:
@@ -2291,16 +2262,21 @@ class OperationsHandlerMixin:
         return {"message": "分类已删除", "categories": self.list_norm_categories()}
 
     def list_norms(self, query):
+        """Flat clause list — drives the document search box, not an entry list.
+
+        A clause's life is only "exists / deleted". Status and effective dates are no
+        longer filters: both used to hide a clause from the document, and the document is
+        the only place a clause can be read or edited, so a harmless-looking status change
+        was in practice an unrecoverable delete. Keyword matching spans
+        title / content / scope / source.
+        """
         user = getattr(self, "api_user", None)
-        include_abolished = str((query.get("include_abolished") or [""])[0]).lower() in {"1", "true", "yes", "on"}
         keyword = (query.get("q") or [""])[0].strip()
         raw_category = (query.get("category_id") or [""])[0].strip()
         with connect() as conn:
             org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
             clauses = ["n.deleted_at IS NULL", org_where]
             params = [*org_params]
-            if not include_abolished:
-                clauses.append("n.status<>'abolished'")
             if raw_category:
                 try:
                     category_id = int(raw_category)
@@ -2329,8 +2305,6 @@ class OperationsHandlerMixin:
                     params,
                 ).fetchall()
             )
-        for row in rows:
-            row["state"] = norm_state(row)
         return rows
 
     def find_norm(self, conn, norm_id, user):
@@ -2349,6 +2323,16 @@ class OperationsHandlerMixin:
         if user.get("role") == "admin":
             return True
         return int(norm["created_by"] or 0) == int(user["id"])
+
+    def can_delete_norm(self, norm, user):
+        """Clause ownership: the author plus administrators — same rule as shelves.
+
+        Editing was already open to the author while deleting was admin-only, which left a
+        member who mistyped a rule with no safe self-correction: the one thing they *could*
+        do themselves (flip the status) used to be irreversible. Delegating to
+        `can_edit_norm` keeps the two in step, and the recycle bin still backs the delete.
+        """
+        return self.can_edit_norm(norm, user)
 
     def resolve_norm_category(self, conn, raw_value, org_unit_id):
         try:
@@ -2378,10 +2362,8 @@ class OperationsHandlerMixin:
         content = (data.get("content") or "").strip()
         scope = (data.get("scope") or "").strip()
         source = (data.get("source") or "").strip()
-        effective_from = parse_norm_date(data.get("effective_from"), "生效日期") or today_iso()
-        effective_to = parse_norm_date(data.get("effective_to"), "失效日期")
-        if effective_to and effective_to < effective_from:
-            raise AppError(400, "失效日期不能早于生效日期")
+        # 记下来就生效：没有生效/失效日期，也没有待确认。这两个字段在表里保留（历史数据
+        # 不动），但一律不写，条款的可见性只看 deleted_at。
         with connect() as conn:
             org_unit_id = self.require_current_org_unit_id(conn, actor, "记录团队规范")
             category_id = self.resolve_norm_category(conn, data.get("category_id"), org_unit_id)
@@ -2398,14 +2380,20 @@ class OperationsHandlerMixin:
                 """,
                 (
                     org_unit_id, category_id, title, content, scope, source, "active",
-                    effective_from, effective_to, sort_order, actor["id"], actor["id"],
+                    None, None, sort_order, actor["id"], actor["id"],
                     now_iso(), now_iso(),
                 ),
             )
             norm_id = cursor.lastrowid
             self.bind_norm_images(conn, norm_id, org_unit_id, content)
             write_audit(conn, actor, "norm.create", "norm", norm_id, "团队规范条目已记录", {"title": title, "category_id": category_id}, self.client_address[0])
-        return {"message": "规范已记入文档", "norms": self.list_norms({})}
+        # 回传落点：客户端据此跳到条款所在的目录并高亮它，省掉「记完了不知道落在哪」。
+        return {
+            "message": "规范已记入文档",
+            "norms": self.list_norms({}),
+            "norm_id": norm_id,
+            "category_id": category_id,
+        }
 
     def update_norm(self, norm_id, user=None):
         actor = user or self.current_user()
@@ -2419,47 +2407,42 @@ class OperationsHandlerMixin:
                 raise AppError(400, "请填写一句话规则")
             if len(title) > 120:
                 raise AppError(400, "一句话规则不要超过 120 字")
-            status = str(data.get("status") or norm["status"] or "active").strip()
-            if status not in NORM_STATUSES:
-                raise AppError(400, "规范状态不正确")
-            if status == "pending" and actor.get("role") != "admin":
-                raise AppError(403, "仅管理员可以标记待确认")
             content = (data.get("content") if "content" in data else norm["content"] or "")
             scope = (data.get("scope") if "scope" in data else norm["scope"] or "")
             source = (data.get("source") if "source" in data else norm["source"] or "")
-            effective_from = parse_norm_date(
-                data.get("effective_from") if "effective_from" in data else norm["effective_from"],
-                "生效日期",
-            ) or today_iso()
-            effective_to = parse_norm_date(
-                data.get("effective_to") if "effective_to" in data else norm["effective_to"],
-                "失效日期",
-            )
-            if effective_to and effective_to < effective_from:
-                raise AppError(400, "失效日期不能早于生效日期")
+            # 状态与生效/失效日期不再由界面写：条款能不能被读到只取决于有没有被删除。
+            # 两列保持原值，早期填过日期或标过状态的行不会因为「保存一次」被抹掉。
             category_id = norm["category_id"]
             if data.get("category_id"):
                 category_id = self.resolve_norm_category(conn, data.get("category_id"), norm["org_unit_id"])
             conn.execute(
                 """
                 UPDATE norms
-                SET category_id=?, title=?, content=?, scope=?, source=?, status=?,
-                    effective_from=?, effective_to=?, updated_by=?, updated_at=?
+                SET category_id=?, title=?, content=?, scope=?, source=?,
+                    updated_by=?, updated_at=?
                 WHERE id=?
                 """,
                 (
                     category_id, title, str(content or "").strip(), str(scope or "").strip(), str(source or "").strip(),
-                    status, effective_from, effective_to, actor["id"], now_iso(), norm_id,
+                    actor["id"], now_iso(), norm_id,
                 ),
             )
             self.bind_norm_images(conn, norm_id, norm["org_unit_id"], content)
-            write_audit(conn, actor, "norm.update", "norm", norm_id, "团队规范条目已更新", {"title": title, "status": status}, self.client_address[0])
-        return {"message": "规范已更新", "norms": self.list_norms({})}
+            write_audit(conn, actor, "norm.update", "norm", norm_id, "团队规范条目已更新", {"title": title, "category_id": category_id}, self.client_address[0])
+        # 回传落点：客户端据此跳到条款所在的目录并高亮它。
+        return {
+            "message": "规范已更新",
+            "norms": self.list_norms({}),
+            "norm_id": norm_id,
+            "category_id": category_id,
+        }
 
     def delete_norm(self, norm_id, user=None):
         actor = user or self.current_user()
         with connect() as conn:
             norm = self.find_norm(conn, norm_id, actor)
+            if not self.can_delete_norm(norm, actor):
+                raise AppError(403, "只能删除自己记录的规范条目，或联系管理员处理")
             conn.execute(
                 "UPDATE norms SET deleted_at=?, deleted_by=? WHERE id=?",
                 (now_iso(), actor["id"], norm_id),
@@ -2516,16 +2499,15 @@ class OperationsHandlerMixin:
         articles = rows_to_list(
             conn.execute(
                 f"""
-                SELECT n.id, n.category_id, n.title, n.content, n.scope, n.source, n.status,
-                       n.effective_from, n.effective_to, n.sort_order, n.created_at, n.created_by,
+                SELECT n.id, n.category_id, n.title, n.content, n.scope, n.source,
+                       n.sort_order, n.created_at, n.created_by,
                        u.display_name AS created_by_name
                 FROM norms n
                 LEFT JOIN users u ON u.id=n.created_by
-                WHERE n.deleted_at IS NULL AND n.status='active' AND {org_where}
-                  AND (n.effective_to IS NULL OR n.effective_to='' OR n.effective_to >= ?)
+                WHERE n.deleted_at IS NULL AND {org_where}
                 ORDER BY n.sort_order, n.id
                 """,
-                [*org_params, today_iso()],
+                org_params,
             ).fetchall()
         )
         images_by_norm = {}
@@ -2582,14 +2564,13 @@ class OperationsHandlerMixin:
                         "content": row["content"] or "",
                         "scope": row["scope"] or "",
                         "source": row["source"] or "",
-                        "status": row["status"],
-                        "effective_from": row["effective_from"] or "",
-                        "effective_to": row["effective_to"] or "",
                         "created_by_name": row["created_by_name"] or "",
                         "created_at": row["created_at"],
-                        # 谁能改这条：作者本人 + 管理员。规则和后端 update_norm 用的是同一个
-                        # can_edit_norm()，前端只按这个标记画"编辑"按钮，不拿 created_by 再算一遍。
+                        # 谁能改 / 删这条：作者本人 + 管理员。规则和后端 update_norm /
+                        # delete_norm 用的是同一个判定，前端只按这两个标记画按钮，
+                        # 不拿 created_by 再算一遍。
                         "can_edit": self.can_edit_norm(row, user),
+                        "can_delete": self.can_delete_norm(row, user),
                         # 正文里的 [[img:id]] 标记靠这张表还原成图片；表里没有的 id 说明
                         # 图片已失效，前端据此不画裂图。
                         "images": images_by_norm.get(row["id"], []),
@@ -2628,10 +2609,7 @@ class OperationsHandlerMixin:
             org_where, org_params = self.organization_current_entity_filter(conn, "n.org_unit_id", user)
             counts = conn.execute(
                 f"""
-                SELECT COUNT(*) AS total,
-                       SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active_count,
-                       SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
-                       SUM(CASE WHEN status='abolished' THEN 1 ELSE 0 END) AS abolished_count
+                SELECT COUNT(*) AS total
                 FROM norms n
                 WHERE n.deleted_at IS NULL AND {org_where}
                 """,
@@ -2643,9 +2621,6 @@ class OperationsHandlerMixin:
                 "documents": documents,
                 "stats": {
                     "total": int(counts["total"] or 0) if counts else 0,
-                    "active": int(counts["active_count"] or 0) if counts else 0,
-                    "pending": int(counts["pending_count"] or 0) if counts else 0,
-                    "abolished": int(counts["abolished_count"] or 0) if counts else 0,
                     "category_count": len(documents),
                 },
             }

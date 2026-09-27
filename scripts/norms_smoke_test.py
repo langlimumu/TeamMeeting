@@ -14,6 +14,7 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
@@ -129,14 +130,20 @@ def main():
 
             request_json(admin, f"{base_url}/api/norms/versions", expected=404)
 
-            request_json(admin, f"{base_url}/api/norms", "POST", {
+            # 日期与状态都不再由界面写：这条特意带上「未来生效 + 早已过期 + 已废止」三重
+            # 曾经会让条款消失的条件，它仍然必须出现在文档里——可见性只看删没删。
+            recorded = request_json(admin, f"{base_url}/api/norms", "POST", {
                 "category_id": first_category["id"],
                 "title": "提交代码前必须通过静态检查",
                 "content": "本地跑通 lint 与单测后再提交。",
                 "scope": "全体研发",
                 "source": "2026-09 周例会决议",
-                "effective_from": "2026-09-01",
+                "effective_from": "2099-01-01",
+                "effective_to": "2000-01-01",
+                "status": "abolished",
             })
+            if recorded.get("norm_id") is None or recorded.get("category_id") != first_category["id"]:
+                raise RuntimeError(f"A recorded clause must report where it landed: {recorded}")
             request_json(admin, f"{base_url}/api/norms", "POST", {
                 "category_id": first_category["id"],
                 "title": "每周例会前提交上周风险清单",
@@ -172,7 +179,9 @@ def main():
                 raise RuntimeError(f"Unexpected document title: {first_document['title']}")
             if "# 目录" in first_document["markdown"]:
                 raise RuntimeError("A single-category document must not grow a table of contents")
-            if document["stats"]["total"] != 3 or document["stats"]["active"] != 3:
+            # 概览只剩「总数」：没有 active / pending / abolished 分项，也就不会出现一个
+            # 看得见却点不进去的数字。
+            if document["stats"]["total"] != 3 or "active" in document["stats"] or "abolished" in document["stats"]:
                 raise RuntimeError(f"Stats mismatch right after recording: {document['stats']}")
 
             request_json(admin, f"{base_url}/api/norms", "POST", {
@@ -194,17 +203,18 @@ def main():
             request_json(admin, f"{base_url}/api/norms/{target['id']}", "PATCH", {
                 "title": "提交代码前必须通过静态检查与单测",
                 "category_id": first_category["id"],
+                # 同样是「以前会让条款消失」的那两个字段，现在传了等于没传。
                 "status": "pending",
+                "effective_to": "2000-01-01",
             })
-            pending_document = request_json(admin, f"{base_url}/api/norms/document")["document"]
-            if pending_document["stats"]["active"] != 3:
-                raise RuntimeError(f"A pending norm must leave the documents: {pending_document['stats']}")
-            pending_articles = [
-                article["no"] for article in documents_by_category(pending_document)[first_category["id"]]["chapters"][0]["articles"]
+            still_there = request_json(admin, f"{base_url}/api/norms/document")["document"]
+            first_articles = [
+                article["no"] for article in documents_by_category(still_there)[first_category["id"]]["chapters"][0]["articles"]
             ]
-            if pending_articles != ["1"]:
-                raise RuntimeError(f"Pending norm must be renumbered out of the document: {pending_articles}")
-            request_json(admin, f"{base_url}/api/norms/{target['id']}", "PATCH", {"status": "active"})
+            if first_articles != ["1", "2"]:
+                raise RuntimeError(f"A status change must not drop a clause from its document: {first_articles}")
+            if still_there["stats"]["total"] != 4:
+                raise RuntimeError(f"Stats must count every live clause: {still_there['stats']}")
 
             created_category = next(
                 item for item in request_json(admin, f"{base_url}/api/norm-categories", "POST", {"name": "测试分类"})["categories"]
@@ -333,7 +343,35 @@ def main():
             })
             request_json(member, f"{base_url}/api/norms/{target['id']}", "PATCH", {"title": "改别人记的"}, 403)
             request_json(member, f"{base_url}/api/norms/{target['id']}", "DELETE", expected=403)
-            request_json(member, f"{base_url}/api/norms/{member_norm['id']}", "PATCH", {"status": "pending"}, 403)
+            # 传 status 不再有任何效果：既不 403，也不会把条款从文档里藏起来。
+            request_json(member, f"{base_url}/api/norms/{member_norm['id']}", "PATCH", {"status": "abolished"})
+            member_articles = {
+                article["title"]: article
+                for item in request_json(member, f"{base_url}/api/norms/document")["document"]["documents"]
+                for article in item["chapters"][0]["articles"]
+            }
+            own_record = member_articles.get("成员改自己的规则")
+            if not own_record:
+                raise RuntimeError(f"A status change must not hide a clause: {sorted(member_articles)}")
+            # 条款的删除跟目录同源：作者本人 + 管理员。两个标记随文档下发，前端据此画按钮。
+            if not own_record["can_delete"] or not own_record["can_edit"]:
+                raise RuntimeError(f"The author must see can_edit / can_delete on their own clause: {own_record}")
+            if member_articles.get("进入现场必须佩戴防护用品", {}).get("can_delete"):
+                raise RuntimeError("A member must not see can_delete on someone else's clause")
+            request_json(member, f"{base_url}/api/norms/{member_norm['id']}", "DELETE")
+            remaining_titles = [
+                article["title"]
+                for item in request_json(member, f"{base_url}/api/norms/document")["document"]["documents"]
+                for article in item["chapters"][0]["articles"]
+            ]
+            if "成员改自己的规则" in remaining_titles:
+                raise RuntimeError(f"An author's delete must take the clause out of its document: {remaining_titles}")
+            member_recycle = [
+                item for item in request_json(admin, f"{base_url}/api/recycle-bin")["items"]
+                if item["entity_type"] == "norm"
+            ]
+            if len(member_recycle) < 1:
+                raise RuntimeError(f"An author's delete must land in the recycle bin: {member_recycle}")
 
             # ---- 目录权限：登录用户都能建一二级目录，但只能删自己建的 ----
             member_name = request_json(member, f"{base_url}/api/me")["user"]["display_name"]
@@ -530,12 +568,29 @@ def main():
                 raise RuntimeError("Removing the marker must release the illustration")
             if not stored_files[0].is_file():
                 raise RuntimeError("Releasing an illustration must not delete the file")
+
+            # ---- 搜索：文档区的搜索框直接复用 list_norms 的 q，命中要带上所属目录 ----
+            hits = request_json(member, f"{base_url}/api/norms?q={quote('静态检查')}")["norms"]
+            if not any(item["title"] == "提交代码前必须通过静态检查与单测" for item in hits):
+                raise RuntimeError(f"The search endpoint must match on the title: {hits}")
+            hits = request_json(member, f"{base_url}/api/norms?q={quote('lint')}")["norms"]
+            if not any(item["title"] == "提交代码前必须通过静态检查与单测" for item in hits):
+                raise RuntimeError(f"The search endpoint must match on the content too: {hits}")
+            hits = request_json(member, f"{base_url}/api/norms?q={quote('防护用品')}")["norms"]
+            if len(hits) != 1 or hits[0]["category_name"] != second_category["name"]:
+                raise RuntimeError(f"A hit must carry the shelf it lives on: {hits}")
+            if request_json(member, f"{base_url}/api/norms?q={quote('绝不存在的关键词xyzzy')}")["norms"]:
+                raise RuntimeError("A keyword with no match must return an empty list")
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
 
-    print("团队规范冒烟测试通过：分类、随手记、按分类分份成文、份内编号、回收站、目录建/改名/删除的归属权限、正文插图的上传/绑定/解绑均符合预期。")
+    print(
+        "团队规范冒烟测试通过：分类、随手记、按分类分份成文、份内编号、回收站、"
+        "目录与条款的归属权限（作者本人 + 管理员）、日期与状态不再影响可见性、"
+        "正文插图的上传/绑定/解绑、按关键词搜索均符合预期。"
+    )
 
 
 if __name__ == "__main__":

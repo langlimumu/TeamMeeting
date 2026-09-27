@@ -1187,6 +1187,10 @@
                   <div class="norm-doc-head-main">
                     <h2 id="normDocHeading">规范文档</h2>
                   </div>
+                  <div class="norm-search">
+                    <input id="normSearchInput" type="search" placeholder="搜索条款：标题 / 内容 / 适用范围" autocomplete="off" aria-label="搜索规范条款" />
+                    <div id="normSearchResults" class="norm-search-results hidden" role="listbox"></div>
+                  </div>
                 </div>
                 <p id="normDocHint" class="norm-doc-hint"></p>
                 <div class="norm-doc-body">
@@ -1204,7 +1208,7 @@
               <aside class="panel norm-side">
                 <section id="normCreatePanel">
                   <h2 id="normFormTitle">随手记一条规范</h2>
-                  <p class="hint-line">一句话写清要求即可，分类会自动跟着左侧选中的目录，也能在这里改。</p>
+                  <p class="hint-line">一句话写清要求即可，分类会自动跟着左侧选中的目录，也能在这里改；记下来即生效，删除的可在回收站找回。</p>
                   <form id="normForm" class="form-grid">
                     <input type="hidden" name="norm_id" value="" />
                     <select name="category_id" data-norm-categories required></select>
@@ -1225,27 +1229,11 @@
                     <div id="normImageThumbs" class="norm-image-thumbs hidden"></div>
                     <input name="scope" placeholder="适用范围（选填，如：全体研发）" />
                     <input name="source" placeholder="来源（选填，如：2026-09 周例会决议）" />
-                    <label>生效日期<input name="effective_from" type="date" /></label>
-                    <label>失效日期<input name="effective_to" type="date" /></label>
-                    <select id="normStatusSelect" name="status"></select>
                     <button id="normSubmitBtn">记入规范</button>
                     <button id="normCancelEditBtn" class="secondary hidden" type="button">取消编辑</button>
                   </form>
                 </section>
 
-                <section id="normCategoryPanel" class="admin-only">
-                  <h2 id="normCategoryFormTitle">规范分类</h2>
-                  <p class="hint-line">建、删、改名都在左侧「目录」上操作（双击目录名就地改名）；这里负责换上级目录和停用。</p>
-                  <form id="normCategoryForm" class="form-row slim norm-category-form hidden">
-                    <input type="hidden" name="category_id" value="" />
-                    <select id="normCategoryParent" name="parent_id"><option value="0">（一级目录）</option></select>
-                    <input name="name" placeholder="分类名称" maxlength="24" required />
-                    <input name="description" placeholder="说明（选填）" />
-                    <button id="normCategorySubmitBtn">新增分类</button>
-                    <button id="normCategoryCancelBtn" class="secondary hidden" type="button">取消</button>
-                  </form>
-                  <div id="normCategoryList" class="norm-category-list"></div>
-                </section>
               </aside>
             </section>
           </section>

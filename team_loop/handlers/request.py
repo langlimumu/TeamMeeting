@@ -644,10 +644,10 @@ class RequestHandlerMixin:
         self.api_user = user
         parts = path.strip("/").split("/")
         action = {"GET": "view", "POST": "create", "PATCH": "edit", "DELETE": "delete"}.get(method, "view")
-        # 规范目录（一级/二级）和「规范条目」不是一回事：目录的规则是「本人建的本人能删，
-        # 管理员都能删」，比模块级的 can_delete 更细，所以按 edit 放行，本人还是管理员
-        # 由 delete_norm_category 按 created_by 判定；条目的删除权限不受影响。
-        if method == "DELETE" and path.startswith("/api/norm-categories/"):
+        # 规范目录和「规范条目」的删除都是「本人建的本人能删，管理员都能删」，比模块级的
+        # can_delete 更细，所以按 edit 放行；到底放不放行由 delete_norm_category /
+        # delete_norm 按 created_by 判定，删别人的东西照样 403。
+        if method == "DELETE" and (path.startswith("/api/norm-categories/") or path.startswith("/api/norms/")):
             action = "edit"
         self.require_module(user, self.module_for_path(path), action)
 
