@@ -5,6 +5,32 @@ import sys
 from urllib.parse import urlsplit
 
 
+# 未登录可读的模块 → 各模块一个有代表性的只读接口。
+#
+# 这份映射是**代码**：它只回答「这个模块的读接口长什么样」。
+# 访客究竟能看哪些模块是**数据**：管理员在「用户类型 → 访客 / 待分类」里随时可改。
+# 两者必须分开。早先这里写死过一份模块清单（members/rules/links/shifts/thank-you），
+# 于是管理员把「机台排班」从访客视图去掉、换成「问题定位排班」之后，
+# 本测试开始对 /api/shifts 报 403 并中断发布 —— 那是权限数据变更，不是回归。
+# 现在改成：先问实例「访客能看什么」（GET /api/me），再只探它报出来的模块。
+#
+# 只收「未登录也能读到 200」的接口。processes 与 dashboard 在 handler 层就要求登录
+# （401 请先登录后使用流程中心 / 登录状态已失效），匿名探不到，故故意不在此列。
+ANONYMOUS_READ_ENDPOINTS = {
+    "members": "/api/members",
+    "moments": "/api/team-moments",
+    "archive": "/api/archive/years",
+    "morning": "/api/morning-items",
+    "meetings": "/api/meetings",
+    "shifts": "/api/shifts",
+    "oncall": "/api/duty-rosters",
+    "norms": "/api/norms/document",
+    "rules": "/api/rules",
+    "thanks": "/api/thank-you",
+    "links": "/api/links",
+}
+
+
 def request(base_url: str, path: str, expect_json: bool = True):
     parsed = urlsplit(base_url)
     host = parsed.hostname or "127.0.0.1"
@@ -62,10 +88,30 @@ def main() -> None:
     if "Team Loop" not in page:
         raise RuntimeError("Home page marker was not found")
 
-    for path in ("/api/members", "/api/rules", "/api/links", "/api/shifts", "/api/thank-you"):
-        request(args.base_url, path)
+    # 访客可见模块由权限模板决定（数据），所以先问实例要这份名单，再逐个探它的读接口。
+    # 访客模板被服务端强制要求「至少保留一个可查看模块」，所以这里是硬性断言：
+    # 一份都拿不到，说明 module_permissions 表或访客模板坏了，而不是「碰巧没配」。
+    permissions = request(args.base_url, "/api/me").get("permissions") or {}
+    guest_modules = permissions.get("modules") or []
+    if not guest_modules:
+        raise RuntimeError(
+            "The guest permission template grants no viewable module: /api/me returned an empty module list"
+        )
+    probed = []
+    for module in sorted(guest_modules):
+        path = ANONYMOUS_READ_ENDPOINTS.get(module)
+        if not path:
+            continue
+        try:
+            request(args.base_url, path)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{exc} — /api/me reports module '{module}' as guest-visible, "
+                "so its read endpoint must answer without a login"
+            ) from exc
+        probed.append({"module": module, "path": path})
 
-    print(json.dumps({"status": "ok", "health": health}, ensure_ascii=False))
+    print(json.dumps({"status": "ok", "health": health, "guest_modules": probed}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
