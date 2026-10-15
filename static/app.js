@@ -74,6 +74,15 @@ const state = {
   dutyRosters: [],
   dutyUsers: [],
   dutyToday: [],
+  environments: [],
+  environmentSummary: null,
+  environmentSecrets: {},
+  editingEnvironmentId: null,
+  // 卡片上点开的那台机器（存 id 字符串），null = 没展开详情。
+  environmentDetailId: null,
+  environmentUsages: [],
+  environmentUsagesLoading: false,
+  environmentFilter: "all",
   normCategories: [],
   normDocument: null,
   normActiveCategory: "",
@@ -128,6 +137,7 @@ const pages = [
   ["rules", "★", "红黑榜", "发布规则、记录积分，并按时间查看排行。"],
   ["thanks", "♥", "Thank You", "每周感谢帮助过自己的团队成员。"],
   ["links", "↗", "常用链接", "归档团队常用系统、文档和工具入口。"],
+  ["environments", "▤", "环境管理", "服务器连接信息与占用交接，一台一张卡片。"],
   ["users", "⚙", "用户管理", "管理员维护账号和权限。"],
   ["system", "▣", "系统管理", "配置、备份和审计日志。"],
 ];
@@ -5333,6 +5343,437 @@ function moveDutyMonth(delta) {
   loadOncall().catch((error) => toast(error.message));
 }
 
+/* ============================================================ 环境管理（卡片墙）
+   一台服务器一张卡片，不做表格：连接信息（IP / 账号 / 密码 / VNC 端口）加上
+   当前占用人与已占用时长，是「找一台能用的机器」的场景，横向铺开比列表好扫。
+
+   三个写操作**各看各的权限**，不共用一个标志位：新增看 create、编辑看 edit、
+   删除看 delete。没权限就不画按钮——否则会「画了、点下去 403」。
+
+   为什么还要叠 `isAdminView()`：模块权限表是「类型 × 模块」的粗闸门，而后端
+   create/update/delete 还有一道 `require_admin()`（和机台、值班表一致）。
+   两道是**与**的关系，缺一道都意味着点了会 403，所以两道都要过才画。
+
+   占用与释放是**每个人对自己做的事**，跟 create/edit/delete 无关——这里只要求
+   已登录，别去叠 canOperate("environments", …)，否则只读类型就点不了占用。 */
+function canWriteEnvironment(action) {
+  if (!isAdminView()) return false;
+  if (state.permissionPreview) return false;
+  return canOperate("environments", action);
+}
+
+function canCreateEnvironment() {
+  return canWriteEnvironment("create");
+}
+
+function canEditEnvironment() {
+  return canWriteEnvironment("edit");
+}
+
+function canDeleteEnvironment() {
+  return canWriteEnvironment("delete");
+}
+
+function canOccupyEnvironments() {
+  return Boolean(state.user) && !state.permissionPreview;
+}
+
+/* 占用时长的人话写法。超过一天改说「N 天」，因为「占用 43 小时」不如「占用 1 天 19 小时」直观。 */
+function environmentDuration(fromValue) {
+  const from = new Date(String(fromValue || "").replace(" ", "T"));
+  if (Number.isNaN(from.getTime())) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - from.getTime()) / 60000));
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时`;
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest ? `${days} 天 ${rest} 小时` : `${days} 天`;
+}
+
+/* 「过了预计归还」按**时刻**比，不是按日期比：预计 18:30 归还，18:31 就该亮橙边，
+   而不是等到第二天。裸日期（历史数据 / 只填了日期）按「当天 23:59:59」算，
+   与后端 normalize_expected_return 的口径一致 —— 两边不一致会让卡片亮着而统计说没超。 */
+function environmentExpectedMoment(value) {
+  const raw = String(value || "").trim().replace(" ", "T");
+  if (!raw) return null;
+  const moment = new Date(raw.length === 10 ? `${raw}T23:59:59` : raw);
+  return Number.isNaN(moment.getTime()) ? null : moment;
+}
+
+function environmentIsOverdue(environment) {
+  const moment = environmentExpectedMoment(environment?.expected_return_at);
+  return Boolean(moment && moment.getTime() < Date.now());
+}
+
+/* 预计归还要看到时刻——「今天 18:30 归还」和「今天归还」是两回事。 */
+function environmentExpectedLabel(value) {
+  const moment = environmentExpectedMoment(value);
+  if (!moment) return "";
+  return `${shortDate(value)} ${String(moment.getHours()).padStart(2, "0")}:${String(moment.getMinutes()).padStart(2, "0")}`;
+}
+
+/* 卡片底部的归属条：空闲 / 我在用 / 张三在用（已占 3 天）。文案里带上「我」，是为了
+   让每个人扫一眼就知道哪张是自己现在该去释放的。 */
+function environmentHolderLine(environment) {
+  if (!environment.occupied) return '<span class="env-holder-empty">空闲中</span>';
+  const who = environment.is_mine ? "我" : escapeHtml(environment.holder_name || "未知成员");
+  const since = environmentDuration(environment.occupied_at);
+  const parts = [`<span class="env-holder-name">${who}</span>`];
+  if (since) parts.push(`<span class="env-holder-since">已占用 ${escapeHtml(since)}</span>`);
+  if (environmentIsOverdue(environment)) {
+    parts.push(`<span class="env-overdue">已过预计归还 ${escapeHtml(environmentExpectedLabel(environment.expected_return_at))}</span>`);
+  } else if (environment.expected_return_at) {
+    parts.push(`<span class="env-holder-since">预计 ${escapeHtml(environmentExpectedLabel(environment.expected_return_at))} 归还</span>`);
+  }
+  return parts.join("");
+}
+
+function environmentCardHtml(environment) {
+  const statusClass = environment.occupied ? (environment.is_mine ? "is-mine" : "is-busy") : "is-free";
+  const overdueClass = environmentIsOverdue(environment) ? " is-overdue" : "";
+  const vnc = environment.vnc_port
+    ? `<span class="env-field"><span class="env-field-label">VNC 端口</span><span class="env-field-value">${escapeHtml(environment.vnc_port)}</span></span>`
+    : "";
+  return `
+    <article class="env-card ${statusClass}${overdueClass}" data-environment-id="${environment.id}">
+      <header class="env-card-head">
+        <div class="env-card-title">
+          <h3>${escapeHtml(environment.name)}</h3>
+          <p class="env-host">${escapeHtml(environment.host)}</p>
+        </div>
+        <span class="env-badge">${environment.occupied ? "使用中" : "空闲"}</span>
+      </header>
+      ${environment.purpose ? `<p class="env-purpose">${escapeHtml(environment.purpose)}</p>` : ""}
+      <div class="env-fields">
+        <span class="env-field"><span class="env-field-label">账号</span><span class="env-field-value">${escapeHtml(environment.username)}</span></span>
+        <span class="env-field"><span class="env-field-label">密码</span><span class="env-field-value env-secret is-masked" data-env-reveal="${environment.id}" title="点击显示密码" role="button" tabindex="0">${environment.password ? "••••••" : "未设置"}</span></span>
+        ${vnc}
+      </div>
+      <div class="env-holder">${environmentHolderLine(environment)}</div>
+      ${environment.occupancy_note ? `<p class="env-note">${escapeHtml(environment.occupancy_note)}</p>` : ""}
+      <footer class="env-card-actions">
+        ${canOccupyEnvironments() && !environment.occupied
+          ? `<button class="env-occupy-btn" type="button" data-env-occupy="${environment.id}">占用</button>`
+          : ""}
+        ${canOccupyEnvironments() && environment.is_mine
+          ? `<button class="env-release-btn secondary" type="button" data-env-release="${environment.id}">释放</button>`
+          : ""}
+        ${environment.occupied && !environment.is_mine
+          ? '<span class="env-busy-note">使用中，暂不可占用</span>'
+          : ""}
+        <button class="env-detail-btn secondary" type="button" data-env-detail="${environment.id}">占用记录</button>
+        ${canEditEnvironment() ? `<button class="env-edit-btn secondary" type="button" data-env-edit="${environment.id}">编辑</button>` : ""}
+        ${canDeleteEnvironment() ? `<button class="env-delete-btn secondary" type="button" data-env-delete="${environment.id}">删除</button>` : ""}
+      </footer>
+    </article>`;
+}
+
+function environmentUsageHtml(usage) {
+  const released = usage.released_at
+    ? `<span class="env-usage-released">${escapeHtml(shortDateTime(usage.released_at))} 交出</span>`
+    : '<span class="env-usage-open">占用中</span>';
+  const span = usage.released_at ? environmentDuration(usage.occupied_at) : environmentDuration(usage.occupied_at);
+  const expected = usage.expected_return_at
+    ? `<span class="env-usage-expected">预计 ${escapeHtml(environmentExpectedLabel(usage.expected_return_at))} 归还</span>`
+    : "";
+  return `
+    <li class="env-usage">
+      <div class="env-usage-main">
+        <strong>${escapeHtml(usage.user_name || "未知成员")}</strong>
+        <span class="env-usage-span">${escapeHtml(span || "")}</span>
+        ${released}
+      </div>
+      <div class="env-usage-meta">
+        <span>${escapeHtml(shortDateTime(usage.occupied_at))} 起</span>
+        ${expected}
+        ${usage.note ? `<span class="env-usage-note">${escapeHtml(usage.note)}</span>` : ""}
+      </div>
+    </li>`;
+}
+
+function renderEnvironmentDetail() {
+  const box = $("#environmentDetail");
+  if (!box) return;
+  const environmentId = state.environmentDetailId;
+  if (!environmentId) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    return;
+  }
+  const environment = (state.environments || []).find((item) => String(item.id) === String(environmentId));
+  if (!environment) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    state.environmentDetailId = null;
+    return;
+  }
+  box.classList.remove("hidden");
+  const usages = state.environmentUsages || [];
+  box.innerHTML = `
+    <div class="panel-title">
+      <div>
+        <h2>${escapeHtml(environment.name)} · 占用记录</h2>
+        <p>共 ${usages.length} 段占用记录，从最近一次往下排。</p>
+      </div>
+      <button class="secondary" type="button" data-env-detail-close>收起</button>
+    </div>
+    ${state.environmentUsagesLoading
+      ? '<p class="empty-note">正在加载占用记录…</p>'
+      : usages.length
+        ? `<ul class="env-usage-list">${usages.map(environmentUsageHtml).join("")}</ul>`
+        : '<p class="empty-note">这台环境还没有人占用过。</p>'}`;
+}
+
+function renderEnvironmentCards() {
+  const box = $("#environmentCards");
+  if (!box) return;
+  const all = state.environments || [];
+  const filter = state.environmentFilter;
+  const rows = all.filter((environment) => {
+    if (filter === "free") return !environment.occupied;
+    if (filter === "busy") return environment.occupied;
+    if (filter === "mine") return environment.is_mine;
+    return true;
+  });
+  const summary = state.environmentSummary || {};
+  const stats = $("#environmentStats");
+  if (stats) {
+    stats.innerHTML = [
+      ["环境总数", summary.total || 0, ""],
+      ["空闲", summary.free || 0, "is-free"],
+      ["使用中", summary.occupied || 0, "is-busy"],
+      ["我占用的", summary.mine || 0, "is-mine"],
+      ["已过预计归还", summary.overdue || 0, "is-overdue"],
+    ]
+      .map(([label, value, tone]) => `
+        <div class="env-stat ${tone}">
+          <strong>${escapeHtml(String(value))}</strong>
+          <span>${escapeHtml(label)}</span>
+        </div>`)
+      .join("");
+  }
+  $$("[data-env-filter]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.envFilter === filter);
+  });
+  const addBtn = $("#environmentAddBtn");
+  if (addBtn) addBtn.classList.toggle("hidden", !canCreateEnvironment());
+  if (!rows.length) {
+    box.innerHTML = all.length
+      ? '<p class="empty-note">当前筛选下没有环境。</p>'
+      : '<p class="empty-note">还没有登记环境，由管理员点右上角「＋ 新增环境」开始。</p>';
+    return;
+  }
+  box.innerHTML = rows.map(environmentCardHtml).join("");
+  renderEnvironmentDetail();
+}
+
+/* 密码默认打码，点一下才展开。展开状态只活在这一张卡片上：重绘（占用、筛选、刷新）
+   之后一律回到打码，所以「点开忘关」不会把明文长期留在屏幕上。
+   明文从 state.environmentSecrets 取，而不是从 DOM 属性读 —— 打进 HTML 的那一刻它就
+   已经进了 DOM，投屏、扩展、DevTools 都看得到。 */
+function toggleEnvironmentSecret(node) {
+  const environmentId = node.dataset.envReveal;
+  if (node.dataset.envShown === "1") {
+    node.textContent = (state.environmentSecrets[environmentId] || "") ? "••••••" : "未设置";
+    node.classList.add("is-masked");
+    node.title = "点击显示密码";
+    delete node.dataset.envShown;
+    return;
+  }
+  const secret = state.environmentSecrets[environmentId] || "";
+  node.textContent = secret || "未设置";
+  node.classList.remove("is-masked");
+  node.title = "点击隐藏密码";
+  node.dataset.envShown = "1";
+}
+
+/* Esc 一键收回所有已展开的密码（不是逐个 toggle —— 有的正显示有的没显示时，
+   逐个 toggle 会把没显示的那个打开）。 */
+function closeEnvironmentSecret() {
+  $$("[data-env-reveal][data-env-shown]").forEach((node) => {
+    node.textContent = (state.environmentSecrets[node.dataset.envReveal] || "") ? "••••••" : "未设置";
+    node.classList.add("is-masked");
+    node.title = "点击显示密码";
+    delete node.dataset.envShown;
+  });
+}
+
+async function loadEnvironments() {
+  const payload = await api("/api/environments");
+  state.environments = payload.environments || [];
+  state.environmentSummary = payload.summary || null;
+  // 密码单独存一份，不混进渲染用的数据里；卡片模板只拿 id 去换。
+  state.environmentSecrets = Object.fromEntries(
+    state.environments.map((item) => [String(item.id), item.password || ""]),
+  );
+  renderEnvironmentCards();
+}
+
+async function loadEnvironmentDetail(environmentId) {
+  state.environmentDetailId = String(environmentId);
+  state.environmentUsagesLoading = true;
+  renderEnvironmentDetail();
+  try {
+    const payload = await api(`/api/environments/${environmentId}`);
+    state.environmentUsages = payload.usages || [];
+  } catch (error) {
+    state.environmentUsages = [];
+    toast(error.message);
+  } finally {
+    state.environmentUsagesLoading = false;
+    renderEnvironmentDetail();
+  }
+}
+
+async function occupyEnvironment(environmentId, expected = "", note = "") {
+  await api(`/api/environments/${environmentId}/occupy`, {
+    method: "POST",
+    body: JSON.stringify({ expected_return_at: expected, note }),
+  });
+  await loadEnvironments();
+  if (state.environmentDetailId) await loadEnvironmentDetail(state.environmentDetailId);
+  toast("已记为你在用");
+}
+
+async function releaseEnvironment(environmentId) {
+  if (!window.confirm("释放后这台环境显示为空闲，确定吗？")) return;
+  const payload = await api(`/api/environments/${environmentId}/release`, { method: "POST" });
+  await loadEnvironments();
+  if (state.environmentDetailId) await loadEnvironmentDetail(state.environmentDetailId);
+  toast(payload.message || "环境已释放");
+}
+
+function openEnvironmentEditor(environment = null) {
+  const form = $("#environmentForm");
+  if (!form) return;
+  state.editingEnvironmentId = environment ? String(environment.id) : null;
+  form.reset();
+  form.elements.environment_id.value = state.editingEnvironmentId || "";
+  form.elements.name.value = environment?.name || "";
+  form.elements.host.value = environment?.host || "";
+  form.elements.username.value = environment?.username || "";
+  // 密码走「留空表示不改」：编辑时把明文回填进表单等于让密码在 DOM 里裸奔，
+  // 而这个弹窗可能被投屏看见。留空就不动它，需要改时手动输入。
+  form.elements.password.value = "";
+  form.elements.password.placeholder = environment
+    ? "留空表示不修改当前密码"
+    : "登录密码（选填）";
+  form.elements.vnc_port.value = environment?.vnc_port || "";
+  form.elements.purpose.value = environment?.purpose || "";
+  $("#environmentModalTitle").textContent = environment ? `编辑「${environment.name}」` : "新增环境";
+  $("#environmentSubmitBtn").textContent = environment ? "保存修改" : "创建环境";
+  const modal = $("#environmentModal");
+  if (modal) {
+    modal.classList.remove("hidden");
+    modal.setAttribute("aria-hidden", "false");
+  }
+  form.elements.name.focus();
+}
+
+function closeEnvironmentEditor() {
+  const modal = $("#environmentModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+  state.editingEnvironmentId = null;
+}
+
+async function submitEnvironmentForm(payload) {
+  const editingId = state.editingEnvironmentId;
+  if (editingId) {
+    await api(`/api/environments/${editingId}`, { method: "PATCH", body: JSON.stringify(payload) });
+  } else {
+    await api("/api/environments", { method: "POST", body: JSON.stringify(payload) });
+  }
+  closeEnvironmentEditor();
+  await loadEnvironments();
+  toast(editingId ? "环境信息已更新" : "环境已新增");
+}
+
+async function deleteEnvironment(environmentId) {
+  const environment = (state.environments || []).find((item) => String(item.id) === String(environmentId));
+  if (!window.confirm(`删除环境「${environment?.name || environmentId}」？占用记录会一并进入回收站。`)) return;
+  const payload = await api(`/api/environments/${environmentId}`, { method: "DELETE" });
+  if (state.environmentDetailId === String(environmentId)) {
+    state.environmentDetailId = null;
+    state.environmentUsages = [];
+  }
+  await loadEnvironments();
+  toast(payload.message || "环境已删除");
+}
+
+/* datetime-local 的值必须是**本地墙钟时间**，不能用 toISOString()（那是 UTC，
+   东八区会差 8 小时）。这里统一走这一个格式化函数，别处要拼本地串都调它。 */
+function localDateTimeValue(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+  ].join("T");
+}
+
+/* 常用归还时刻不设成按钮（原生日历已经够用），但默认预填「今天下班前」——
+   多数占用都是当天就要还，预填一个常见时刻比对着空白控件发愣强。 */
+function defaultEnvironmentReturn() {
+  const moment = new Date();
+  moment.setHours(18, 0, 0, 0);
+  if (moment.getTime() <= Date.now()) moment.setDate(moment.getDate() + 1);
+  return moment;
+}
+
+/* 回显「已经选了什么」：原生日历弹层没有确定按钮，选完之后界面必须自己说一声，
+   否则用户不知道值有没有进去、弹层要不要手动关。 */
+function renderEnvironmentReturnEcho() {
+  const echo = $("#environmentReturnEcho");
+  const input = $("#environmentOccupyForm")?.elements?.expected_return_at;
+  if (!echo || !input) return;
+  const moment = environmentExpectedMoment(input.value);
+  if (!moment) {
+    echo.textContent = "未设置（不催归还）";
+    echo.classList.remove("is-set");
+    return;
+  }
+  const passed = moment.getTime() < Date.now();
+  const clock = `${String(moment.getHours()).padStart(2, "0")}:${String(moment.getMinutes()).padStart(2, "0")}`;
+  echo.textContent = `已选：${shortDate(input.value)} ${clock}${passed ? "（这个时刻已经过了）" : ""}`;
+  echo.classList.toggle("is-set", !passed);
+}
+
+function setEnvironmentReturnValue(date) {
+  const input = $("#environmentOccupyForm")?.elements?.expected_return_at;
+  if (!input || !date) return;
+  input.value = localDateTimeValue(date);
+  renderEnvironmentReturnEcho();
+}
+
+/* 占用弹窗：预计归还时刻（带快捷按钮与实时回显）和一句备注，其余信息卡片上已经有了。
+   这里不再有「交接」的说法：占用只能从空闲状态发起，别人在用的机器卡片上根本不画
+   占用按钮（后端也 409 兜底），所以走到这个弹窗的一定是一台空闲机器。 */
+function openEnvironmentOccupyModal(environmentId) {
+  const environment = (state.environments || []).find((item) => String(item.id) === String(environmentId));
+  const modal = $("#environmentOccupyModal");
+  const form = $("#environmentOccupyForm");
+  if (!modal || !form) return;
+  form.reset();
+  form.elements.environment_id.value = environmentId;
+  form.elements.note.value = "";
+  // 默认预填「今天下班前」，过了就顺延到明天 —— 机器多半当天就要还。
+  setEnvironmentReturnValue(defaultEnvironmentReturn());
+  $("#environmentOccupyTitle").textContent = environment ? `占用「${environment.name}」` : "占用环境";
+  $("#environmentOccupyHint").textContent = "记下来这台机器就是你正在用，占用时长从现在开始算；用完记得释放，别人才能接。";
+  modal.classList.remove("hidden");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function closeEnvironmentOccupyModal() {
+  const modal = $("#environmentOccupyModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  modal.setAttribute("aria-hidden", "true");
+}
+
 /* 条款行尾「编辑」按钮的显示条件。can_edit 由后端按 can_edit_norm()（作者本人 + 管理员）
    算好下发，前端不重新实现归属规则。预览模式例外——预览是按「用户类型」演的，而归属是
    「具体某个人写的」，从一个类型推不出来，所以预览时一律不画（与目录删除按钮同一条约定）。 */
@@ -6350,6 +6791,7 @@ async function refreshPageData(id = state.currentPage) {
     rules: loadRulesAndScores,
     thanks: loadThanks,
     links: loadLinks,
+    environments: loadEnvironments,
     users: loadUsers,
     system: loadSystemAdmin,
   };
@@ -6369,6 +6811,7 @@ async function refreshAll() {
   if (canLoadModule("links")) loaders.push(loadLinks);
   if (canLoadModule("shifts")) loaders.push(loadShifts);
   if (canLoadModule("oncall")) loaders.push(loadOncall);
+  if (canLoadModule("environments")) loaders.push(loadEnvironments);
   if (canLoadModule("norms")) loaders.push(loadNorms);
   if (canLoadModule("thanks")) loaders.push(loadThanks);
   if (canLoadModule("archive")) loaders.push(loadArchive);
@@ -7862,6 +8305,45 @@ function bindEvents() {
     if (input) commitNormRename(input);
   });
   $("#normAddRootCategoryBtn")?.addEventListener("click", () => openNormCategoryCreateModal());
+  // 环境管理：卡片上的按钮走事件委托（卡片每次重绘），筛选与弹窗是固定节点，直接绑。
+  $("#environmentAddBtn")?.addEventListener("click", () => openEnvironmentEditor());
+  $$("[data-env-filter]").forEach((button) => button.addEventListener("click", () => {
+    state.environmentFilter = button.dataset.envFilter || "all";
+    renderEnvironmentCards();
+  }));
+  $$("[data-environment-modal-close]").forEach((button) => button.addEventListener("click", closeEnvironmentEditor));
+  $("#environmentForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = formData(event.currentTarget);
+    const payload = {
+      name: data.name,
+      host: data.host,
+      username: data.username,
+      purpose: data.purpose || "",
+      vnc_port: data.vnc_port || "",
+    };
+    // 留空 = 不改密码（见 openEnvironmentEditor 的注释），所以空值根本不发出去，
+    // 否则后端会把旧密码清成空串。
+    if (data.password) payload.password = data.password;
+    submitEnvironmentForm(payload).catch((error) => toast(error.message));
+  });
+  $$("[data-environment-occupy-close]").forEach((button) => button.addEventListener("click", closeEnvironmentOccupyModal));
+  // 日历弹层里没有「确定」，所以靠实时回显告诉用户值已经进去了。
+  $$("[data-env-return-clear]").forEach((button) => button.addEventListener("click", () => {
+    const input = $("#environmentOccupyForm")?.elements?.expected_return_at;
+    if (!input) return;
+    input.value = "";
+    renderEnvironmentReturnEcho();
+  }));
+  $("#environmentOccupyForm")?.elements?.expected_return_at?.addEventListener("input", renderEnvironmentReturnEcho);
+  $("#environmentOccupyForm")?.elements?.expected_return_at?.addEventListener("change", renderEnvironmentReturnEcho);
+  $("#environmentOccupyForm")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const data = formData(event.currentTarget);
+    const environmentId = data.environment_id;
+    closeEnvironmentOccupyModal();
+    occupyEnvironment(environmentId, data.expected_return_at || "", data.note || "").catch((error) => toast(error.message));
+  });
   $("#normCategoryCreateForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = formData(event.currentTarget);
@@ -8193,6 +8675,8 @@ function bindEvents() {
       closeForumDetailModal();
       closeSsoDiagnosticModal();
       closeShiftPopover();
+      // Esc 顺手把已经点开的密码收回去：明文留在屏幕上总是不好的。
+      closeEnvironmentSecret();
       return;
     }
     if (!$("#momentGalleryModal")?.classList.contains("hidden") && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
@@ -8214,6 +8698,12 @@ function bindEvents() {
     if (forumTopic && !event.target.closest("button, input, select, textarea, label, a") && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       openForumDetail(forumTopic.dataset.forumPostId).catch((error) => toast(error.message));
+    }
+    // 密码是 span 而不是 button（塞在说明文字里不能是 button 嵌套），所以要自己补键盘路径。
+    const envSecret = event.target.closest?.("[data-env-reveal]");
+    if (envSecret && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      toggleEnvironmentSecret(envSecret);
     }
   });
 
@@ -8754,6 +9244,59 @@ function bindEvents() {
     }
     if (event.target.closest("[data-norm-category-modal-close]") || event.target === $("#normCategoryModal")) {
       closeNormCategoryModal();
+      return;
+    }
+    if (event.target.closest("[data-environment-modal-close]") || event.target === $("#environmentModal")) {
+      closeEnvironmentEditor();
+      return;
+    }
+    if (event.target.closest("[data-environment-occupy-close]") || event.target === $("#environmentOccupyModal")) {
+      closeEnvironmentOccupyModal();
+      return;
+    }
+    if (event.target.closest("[data-env-detail-close]")) {
+      state.environmentDetailId = null;
+      state.environmentUsages = [];
+      renderEnvironmentDetail();
+      return;
+    }
+    // 环境卡片上的操作一律走委托：卡片是整块重绘的，绑在节点上的监听器活不过下一次渲染。
+    const envSecret = event.target.closest("[data-env-reveal]");
+    if (envSecret) {
+      toggleEnvironmentSecret(envSecret);
+      return;
+    }
+    const envOccupy = event.target.closest("[data-env-occupy]");
+    if (envOccupy) {
+      openEnvironmentOccupyModal(envOccupy.dataset.envOccupy);
+      return;
+    }
+    const envRelease = event.target.closest("[data-env-release]");
+    if (envRelease) {
+      releaseEnvironment(envRelease.dataset.envRelease).catch((error) => toast(error.message));
+      return;
+    }
+    const envDetail = event.target.closest("[data-env-detail]");
+    if (envDetail) {
+      const environmentId = envDetail.dataset.envDetail;
+      if (state.environmentDetailId === environmentId) {
+        state.environmentDetailId = null;
+        state.environmentUsages = [];
+        renderEnvironmentDetail();
+      } else {
+        loadEnvironmentDetail(environmentId).catch((error) => toast(error.message));
+      }
+      return;
+    }
+    const envEdit = event.target.closest("[data-env-edit]");
+    if (envEdit) {
+      const environment = state.environments.find((item) => String(item.id) === String(envEdit.dataset.envEdit));
+      if (environment) openEnvironmentEditor(environment);
+      return;
+    }
+    const envDelete = event.target.closest("[data-env-delete]");
+    if (envDelete) {
+      deleteEnvironment(envDelete.dataset.envDelete).catch((error) => toast(error.message));
       return;
     }
     if (event.target.closest("[data-link-delete-confirm]")) {

@@ -862,7 +862,8 @@ SSO_USERNAME_FALLBACKS = (
 
 SSO_RETURN_VIEWS = {
     "members", "dashboard", "archive", "morning", "processes", "meetings",
-    "shifts", "oncall", "norms", "rules", "thanks", "links", "users", "system",
+    "shifts", "oncall", "norms", "rules", "thanks", "links", "environments",
+    "users", "system",
 }
 
 
@@ -1391,6 +1392,47 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            -- 环境（服务器）台账。一台机器一行：连接信息由管理员维护，占用人写在
+            -- current_user_id 上——「当前谁在用」是这台机器的**当前状态**，而不是历史。
+            -- 交接 = 把 current_user_id 换成下一个人（并重置 occupied_at），历史留在
+            -- environment_usages 里，所以卡片上永远只有一个人，不会有半路接手的时间歧义。
+            CREATE TABLE IF NOT EXISTS environments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL DEFAULT '',
+                vnc_port INTEGER,
+                purpose TEXT,
+                current_user_id INTEGER REFERENCES users(id),
+                occupied_at TEXT,
+                expected_return_at TEXT,
+                occupancy_note TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                updated_at TEXT,
+                deleted_at TEXT,
+                deleted_by INTEGER
+            );
+
+            -- 每一次占用一段。释放时写 released_at；直接交接给下一个人时，上一条在这里
+            -- 收口（released_at = 交接时刻），同时开新的一条 —— 于是「谁从什么时候用到
+            -- 什么时候」永远成对，不会出现一条永远 open 的记录。
+            CREATE TABLE IF NOT EXISTS environment_usages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                environment_id INTEGER NOT NULL REFERENCES environments(id),
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                occupied_at TEXT NOT NULL,
+                expected_return_at TEXT,
+                released_at TEXT,
+                note TEXT,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL
+            );
+
             -- parent_id NULL = a top-level shelf; non-NULL = a sub-shelf of it. The tree is
             -- deliberately capped at two levels: both levels hold norms and each category
             -- owns its own document, so a third level would add no reading value.
@@ -1717,6 +1759,12 @@ def init_db():
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_duty_rosters_slot ON duty_rosters(org_unit_id, user_id, duty_date, start_time)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_date ON duty_rosters(duty_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_duty_rosters_user_date ON duty_rosters(user_id, duty_date)")
+        # 环境卡片按「先空闲、再占用时长最长」排，排序键在占用列上，所以给它建索引；
+        # 占用记录按环境 + 时间倒序翻（详情弹窗），再按人查「我这段时间占了哪几台」。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_environments_unit ON environments(org_unit_id, deleted_at, sort_order, name)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_environments_holder ON environments(org_unit_id, deleted_at, current_user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_environment_usages_env ON environment_usages(environment_id, occupied_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_environment_usages_user ON environment_usages(user_id, occupied_at DESC)")
         # 规范分类重名只在该「上级目录」内成立：不同上级下可以各有一个「python研发流程」。
         # 老库上的 (org_unit_id, name) 唯一索引范围过宽，先删掉再按 parent 建新的。
         conn.execute("DROP INDEX IF EXISTS idx_norm_categories_unit_name")

@@ -12662,3 +12662,434 @@ body[data-theme] .norm-image-thumb-remove {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* ============================================================ 环境管理（卡片墙）
+   一台一张卡片，横向铺开：minmax 下限保证窄屏退化成单列，而不是把卡片压成一条。
+   所有按钮形状的类都按仓库约定成对写 `X, body[data-theme] X` —— 主题里的元素级
+   button 规则特异性是 (0,1,2)，会盖过单个类 (0,1,0)。 */
+.env-head-panel {
+  margin-bottom: 14px;
+}
+
+.env-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.env-filters {
+  display: flex;
+  gap: 6px;
+}
+
+.env-filters button,
+body[data-theme] .env-filters button {
+  min-height: 32px;
+  padding: 4px 12px;
+  border-radius: 999px;
+}
+
+/* 筛选按钮是 .secondary，本身就是灰底；选中态再加一条主色描边 + 白字，
+   否则「全部/空闲/使用中」看不出当前生效的是哪个。 */
+.env-filters button.is-active,
+body[data-theme] .env-filters button.is-active {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: #fff;
+}
+
+.env-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.env-stat {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 8px 12px;
+}
+
+.env-stat strong {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.env-stat span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.env-stat.is-free {
+  border-left-color: var(--green);
+}
+
+.env-stat.is-busy {
+  border-left-color: var(--blue);
+}
+
+.env-stat.is-mine {
+  border-left-color: var(--green);
+}
+
+.env-stat.is-overdue {
+  border-left-color: var(--orange);
+}
+
+.env-stat.is-overdue strong {
+  color: var(--orange);
+}
+
+/* 卡片墙：auto-fill + minmax(280px, 1fr)，宽屏一行铺 4-5 张，窄屏自然退成 1 列。 */
+.env-card-wall {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.env-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 14px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+}
+
+/* 顶边颜色即状态：绿=空闲、蓝=别人在用、深蓝=我在用。扫一眼顶边就知道有没有空闲机器。 */
+.env-card.is-free {
+  border-top-color: var(--green);
+}
+
+.env-card.is-busy {
+  border-top-color: var(--blue);
+}
+
+.env-card.is-mine {
+  border-top-color: var(--green);
+  background: var(--panel-soft);
+}
+
+/* 过了预计归还还没交：整张卡片描一圈橙色，提醒该找人交接了。 */
+.env-card.is-overdue {
+  border-color: var(--orange);
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.18);
+}
+
+.env-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.env-card-title {
+  min-width: 0;
+}
+
+.env-card-title h3 {
+  margin: 0;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.env-host {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.env-badge {
+  flex: none;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  padding: 2px 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.env-card.is-free .env-badge {
+  background: rgba(0, 180, 115, 0.12);
+  color: var(--green);
+}
+
+.env-card.is-busy .env-badge,
+.env-card.is-mine .env-badge {
+  background: rgba(91, 118, 254, 0.12);
+  color: var(--blue);
+}
+
+.env-purpose {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.env-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.env-field {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.env-field-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 凭据用等宽字体：一串随机字符用比例字体不好逐字核对。 */
+.env-field-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* 密码默认打码（●●●●●●）。点一下在本地展开：明文不进 DOM 属性、也不保存，
+   但仍要给出「能点」的暗示，所以给 pointer + title。 */
+.env-secret {
+  cursor: pointer;
+  letter-spacing: 1px;
+}
+
+.env-secret.is-masked {
+  color: var(--muted);
+  user-select: none;
+}
+
+.env-secret:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* 别人在用时的占位说明：不给按钮，只说清楚为什么不能点，免得像是漏了。 */
+.env-busy-note {
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.env-holder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+  font-size: 12px;
+}
+
+.env-holder-name {
+  font-weight: 600;
+}
+
+.env-card.is-free .env-holder-name,
+.env-holder-empty {
+  color: var(--green);
+}
+
+.env-holder-since {
+  color: var(--muted);
+}
+
+.env-overdue {
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--orange);
+  padding: 1px 8px;
+}
+
+.env-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.env-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.env-card-actions button,
+body[data-theme] .env-card-actions button {
+  min-height: 30px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.env-occupy-btn,
+body[data-theme] .env-occupy-btn {
+  background: var(--blue);
+  color: #fff;
+  border: 1px solid var(--blue);
+}
+
+/* 「删除」是破坏性操作但走 .secondary（灰底）：卡片上的按钮要一眼分出
+   主操作（占用）与收尾操作（记录/编辑/删除），红色留给 hover。 */
+.env-delete-btn,
+body[data-theme] .env-delete-btn {
+  color: var(--muted);
+}
+
+.env-delete-btn:hover,
+body[data-theme] .env-delete-btn:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.env-detail-panel {
+  margin-bottom: 14px;
+}
+
+.env-usage-list {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.env-usage {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.env-usage-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.env-usage-span,
+.env-usage-released {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.env-usage-open {
+  border-radius: 999px;
+  background: rgba(91, 118, 254, 0.12);
+  color: var(--blue);
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.env-usage-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.env-usage-note {
+  overflow-wrap: anywhere;
+}
+
+/* 占用弹窗里的预计归还块：日历 + 清除 + 实时回显。
+   原生 datetime-local 弹层没有「确定」，所以这一块自己负责给出确认感。 */
+.env-return-block {
+  display: grid;
+  gap: 8px;
+}
+
+.env-return-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.env-return-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-return-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 「清除」是个裸 <button>，必须成对写主题覆盖，否则在 miro/dingtalk 下会变成蓝药丸。 */
+.env-return-clear,
+body[data-theme] .env-return-clear {
+  flex: none;
+  min-height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--muted);
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.env-return-clear:hover,
+body[data-theme] .env-return-clear:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* 回显行就是「确认感」的载体：原生日历选完之后必须看得见选了什么。 */
+.env-return-echo {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.env-return-echo.is-set {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.env-return-echo:not(.is-set) {
+  color: var(--orange);
+}
+
+@media (max-width: 1100px) {
+  .env-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .env-card-wall {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .env-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .env-head-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

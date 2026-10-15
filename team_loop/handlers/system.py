@@ -24,6 +24,7 @@ class SystemHandlerMixin:
             "meeting_item": "会议议题",
             "team_moment": "团队时刻",
             "norm": "规范条目",
+            "environment": "环境",
         }
         for item in items:
             item["entity_label"] = labels.get(item["entity_type"], item["entity_type"])
@@ -62,6 +63,13 @@ class SystemHandlerMixin:
                 conn.execute("UPDATE team_moments SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
             elif entity_type == "norm":
                 conn.execute("UPDATE norms SET deleted_at=NULL, deleted_by=NULL WHERE id=?", (item["entity_id"],))
+            elif entity_type == "environment":
+                # 恢复环境时占用状态一并清空：占用人可能早就换人了，硬把旧的 current_user_id
+                # 挂回去等于凭空冒出一段没人确认过的占用。历史在 environment_usages 里，不会丢。
+                conn.execute(
+                    "UPDATE environments SET deleted_at=NULL, deleted_by=NULL, current_user_id=NULL, occupied_at=NULL, expected_return_at=NULL, occupancy_note=NULL WHERE id=?",
+                    (item["entity_id"],),
+                )
             elif entity_type == "user":
                 conn.execute("UPDATE users SET active=1 WHERE id=?", (item["entity_id"],))
                 conn.execute("UPDATE members SET active=1 WHERE user_id=?", (item["entity_id"],))
@@ -101,6 +109,9 @@ class SystemHandlerMixin:
                 conn.execute("DELETE FROM team_moments WHERE id=?", (item["entity_id"],))
             elif item["entity_type"] == "norm":
                 conn.execute("DELETE FROM norms WHERE id=?", (item["entity_id"],))
+            elif item["entity_type"] == "environment":
+                conn.execute("DELETE FROM environment_usages WHERE environment_id=?", (item["entity_id"],))
+                conn.execute("DELETE FROM environments WHERE id=?", (item["entity_id"],))
             else:
                 raise AppError(400, "该类型暂不支持彻底删除")
             conn.execute(

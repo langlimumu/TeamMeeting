@@ -142,6 +142,7 @@ MODULE_CATALOG = [
     {"key": "rules", "name": "红黑榜", "description": "红黑榜细则和积分看板"},
     {"key": "thanks", "name": "Thank You", "description": "团队感谢墙和 Thank You 之星"},
     {"key": "links", "name": "常用链接", "description": "系统、文档和工具入口"},
+    {"key": "environments", "name": "环境管理", "description": "服务器连接信息与占用交接，一台一张卡片"},
 ]
 MODULE_KEYS = {item["key"] for item in MODULE_CATALOG}
 PERMISSION_ACTIONS = ("view", "create", "edit", "delete")
@@ -173,11 +174,17 @@ INITIAL_TYPE_OPERATIONS = {
         "rules": (1, 0, 0, 0),
         "thanks": (1, 1, 1, 1),
         "links": (1, 1, 1, 1),
+        # 环境管理：默认类型只给「看」——连接信息（IP / 账号 / 密码 / 端口）的增删改
+        # 由管理员在 handler 里 require_admin() 兜底，这里不靠模块权限表达，
+        # 因为「只有管理员能维护台账」比模块表粗一档，留给 handler 判定更清楚。
+        # 「占用 / 释放」是全员日常动作，同样只看登录，不看 create/edit/delete。
+        "environments": (1, 0, 0, 0),
     },
     GUEST_USER_TYPE_KEY: {
         **{module: (1, 0, 0, 0) for module in LEGACY_GUEST_MODULES},
         # 访客只读：团队规范是大家共读的规则，访客（含未登录）能看到文档，但不参与增删目录与条款。
         "norms": (1, 0, 0, 0),
+        # 环境信息含服务器账号密码，访客一律不给（连 view 都不给），避免密码落到未登录的人手里。
     },
 }
 MORNING_STATUSES = {"todo", "doing", "risk", "done"}

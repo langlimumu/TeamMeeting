@@ -53,6 +53,46 @@ def duty_hours(start_time, end_time):
 NORM_OTHER_CHAPTER_NAME = "其他"
 
 
+def normalize_expected_return(value, label="预计归还时间"):
+    """Accept a date or a full timestamp and store a comparable ISO string.
+
+    The occupancy form sends `datetime-local` values ("2026-10-15T18:30:00"), but a
+    hand-crafted request may still send a bare date, and rows written before this
+    field carried a time are dates too — so both are accepted and dates mean "that
+    whole day". Everything is normalised to a full ISO timestamp, which is what
+    makes "已经过了预计归还时间" a plain string comparison instead of two code paths.
+    """
+    raw = str(value or "").strip().replace(" ", "T")
+    if not raw:
+        return ""
+    try:
+        if len(raw) == 10:
+            parsed = dt.datetime.combine(dt.date.fromisoformat(raw), dt.time(23, 59, 59))
+        else:
+            parsed = dt.datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise AppError(400, f"{label}格式不正确") from exc
+    return parsed.replace(microsecond=0).isoformat()
+
+
+def expected_return_passed(value, now=None):
+    """True when a stored expected-return timestamp is already in the past.
+
+    Unparseable or blank values count as "not passed" so a malformed row can never
+    light up every card as overdue.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        moment = dt.datetime.fromisoformat(raw.replace(" ", "T"))
+    except ValueError:
+        return False
+    if moment.tzinfo is None and (now or dt.datetime.now()).tzinfo is not None:
+        moment = moment.replace(tzinfo=(now or dt.datetime.now()).tzinfo)
+    return moment < (now or dt.datetime.now())
+
+
 def build_norm_markdown(title, chapters, extra_lines=None):
     """Render one category document into plain Markdown."""
     chapters = chapters or []
@@ -1694,6 +1734,361 @@ class OperationsHandlerMixin:
             key=lambda item: (-item["duty_count"], -item["hours"], item["display_name"] or ""),
         )
         return {"by_user": by_user}
+
+    # ---------------------------------------------------------------- environments
+    # 一台服务器一行 environments（连接信息 + 当前占用人），每一次占用一段
+    # environment_usages。两者刻意分开：「当前谁在用」是状态，会被交接覆盖；「谁什么时候
+    # 用过」是历史，只追加不修改。占用记录永远成对收口，不留悬空的 open 行。
+
+    def environment_fields(self, data, partial=False):
+        """Validate one environment payload. Returns the columns that were supplied."""
+        fields = {}
+        if not partial or "name" in data:
+            name = str(data.get("name") or "").strip()
+            if not name:
+                raise AppError(400, "环境名称不能为空")
+            fields["name"] = name
+        if not partial or "host" in data:
+            host = str(data.get("host") or "").strip()
+            if not host:
+                raise AppError(400, "IP 或主机名不能为空")
+            if len(host) > 120 or any(char.isspace() for char in host):
+                raise AppError(400, "IP 或主机名格式不正确，请勿包含空格")
+            fields["host"] = host
+        if not partial or "username" in data:
+            username = str(data.get("username") or "").strip()
+            if not username:
+                raise AppError(400, "登录账号不能为空")
+            fields["username"] = username
+        if "password" in data:
+            fields["password"] = str(data.get("password") or "")
+        if "purpose" in data:
+            purpose = str(data.get("purpose") or "").strip()
+            if len(purpose) > 200:
+                raise AppError(400, "用途备注请控制在 200 字以内")
+            fields["purpose"] = purpose
+        if "vnc_port" in data:
+            raw_port = str(data.get("vnc_port") or "").strip()
+            if not raw_port:
+                fields["vnc_port"] = None
+            else:
+                try:
+                    port = int(raw_port)
+                except (TypeError, ValueError) as exc:
+                    raise AppError(400, "VNC 端口必须是数字") from exc
+                if not 1 <= port <= 65535:
+                    raise AppError(400, "VNC 端口需在 1-65535 之间")
+                fields["vnc_port"] = port
+        return fields
+
+    def environment_name_taken(self, conn, org_unit_id, name, exclude_id=None):
+        row = conn.execute(
+            "SELECT id FROM environments WHERE org_unit_id=? AND deleted_at IS NULL AND name=? COLLATE NOCASE",
+            (org_unit_id, name),
+        ).fetchone()
+        return bool(row and (exclude_id is None or int(row["id"]) != int(exclude_id)))
+
+    def find_environment(self, conn, environment_id, user=None):
+        org_where, org_params = self.organization_current_entity_filter(conn, "e.org_unit_id", user)
+        environment = conn.execute(
+            f"SELECT e.* FROM environments e WHERE e.id=? AND e.deleted_at IS NULL AND {org_where}",
+            [environment_id, *org_params],
+        ).fetchone()
+        if not environment:
+            raise AppError(404, "环境不存在或不在当前团队")
+        return environment
+
+    def list_environments(self, user=None):
+        """Every environment of the selected unit, each with its current holder.
+
+        The password is shipped in plain text on purpose: this is an internal server
+        ledger and the team asked to read credentials straight off the card. That is
+        also why the module is kept out of the guest view entirely (no `can_view` for
+        guest), instead of hiding the field.
+        """
+        with connect() as conn:
+            org_where, org_params = self.organization_current_entity_filter(conn, "e.org_unit_id", user)
+            rows = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT e.*, u.display_name AS holder_name, o.name AS holder_org_name
+                    FROM environments e
+                    LEFT JOIN users u ON u.id = e.current_user_id
+                    LEFT JOIN org_units o ON o.id = u.org_unit_id
+                    WHERE e.deleted_at IS NULL AND {org_where}
+                    ORDER BY e.sort_order, e.name COLLATE NOCASE, e.id
+                    """,
+                    org_params,
+                ).fetchall()
+            )
+        for row in rows:
+            row["occupied"] = bool(row.get("current_user_id"))
+            row["is_mine"] = bool(user and row.get("current_user_id") == user.get("id"))
+        return rows
+
+    def environment_summary(self, user=None):
+        rows = self.list_environments(user)
+        occupied = [row for row in rows if row["occupied"]]
+        overdue = [row for row in occupied if expected_return_passed(row.get("expected_return_at"))]
+        mine = [row for row in occupied if row["is_mine"]]
+        return {
+            "total": len(rows),
+            "free": len(rows) - len(occupied),
+            "occupied": len(occupied),
+            "overdue": len(overdue),
+            "mine": len(mine),
+        }
+
+    def get_environment_detail(self, environment_id, user=None):
+        """One environment plus its full occupancy history, newest first."""
+        actor = user or self.current_user(required=False)
+        with connect() as conn:
+            environment = self.find_environment(conn, environment_id, actor)
+            org_where, org_params = self.organization_current_entity_filter(conn, "e.org_unit_id", actor)
+            detail = conn.execute(
+                f"""
+                SELECT e.*, u.display_name AS holder_name, o.name AS holder_org_name
+                FROM environments e
+                LEFT JOIN users u ON u.id = e.current_user_id
+                LEFT JOIN org_units o ON o.id = u.org_unit_id
+                WHERE e.id=? AND {org_where}
+                """,
+                [environment_id, *org_params],
+            ).fetchone()
+            usages = rows_to_list(
+                conn.execute(
+                    f"""
+                    SELECT g.*, u.display_name AS user_name
+                    FROM environment_usages g
+                    JOIN users u ON u.id = g.user_id
+                    JOIN environments e ON e.id = g.environment_id
+                    WHERE g.environment_id=? AND {org_where}
+                    ORDER BY g.occupied_at DESC, g.id DESC
+                    """,
+                    [environment_id, *org_params],
+                ).fetchall()
+            )
+            holder = rows_to_list(
+                conn.execute(
+                    """
+                    SELECT e.*, u.display_name AS holder_name, o.name AS holder_org_name
+                    FROM environments e
+                    LEFT JOIN users u ON u.id = e.current_user_id
+                    LEFT JOIN org_units o ON o.id = u.org_unit_id
+                    WHERE e.id=?
+                    """,
+                    (environment_id,),
+                ).fetchall()
+            )[0]
+        holder["occupied"] = bool(holder.get("current_user_id"))
+        holder["is_mine"] = bool(actor and holder.get("current_user_id") == actor.get("id"))
+        return {"environment": holder, "usages": usages}
+
+    def create_environment(self):
+        admin = self.require_admin()
+        data = read_json(self)
+        fields = self.environment_fields(data)
+        with connect() as conn:
+            context = self.organization_context(conn, admin)
+            org_unit_id = (context.get("selected") or {}).get("id")
+            if not org_unit_id:
+                raise AppError(400, "当前团队不存在，无法新增环境")
+            if self.environment_name_taken(conn, org_unit_id, fields["name"]):
+                raise AppError(409, "当前团队已存在同名环境")
+            columns = ["org_unit_id", *fields.keys(), "created_by", "created_at"]
+            values = [org_unit_id, *fields.values(), admin["id"], now_iso()]
+            cursor = conn.execute(
+                f"INSERT INTO environments({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                values,
+            )
+            write_audit(
+                conn,
+                admin,
+                "environment.create",
+                "environment",
+                cursor.lastrowid,
+                "环境已新增",
+                {"name": fields["name"], "host": fields["host"], "org_unit_id": org_unit_id},
+                self.client_address[0],
+            )
+        return {"message": "环境已新增", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
+
+    def update_environment(self, environment_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        fields = self.environment_fields(data, partial=True)
+        if not fields:
+            raise AppError(400, "没有需要更新的内容")
+        with connect() as conn:
+            environment = self.find_environment(conn, environment_id, admin)
+            if "name" in fields and self.environment_name_taken(
+                conn, environment["org_unit_id"], fields["name"], exclude_id=environment_id
+            ):
+                raise AppError(409, "当前团队已存在同名环境")
+            assignments = [f"{key}=?" for key in fields]
+            assignments.append("updated_at=?")
+            conn.execute(
+                f"UPDATE environments SET {','.join(assignments)} WHERE id=?",
+                [*fields.values(), now_iso(), environment_id],
+            )
+            write_audit(
+                conn,
+                admin,
+                "environment.update",
+                "environment",
+                environment_id,
+                "环境信息已更新",
+                {"name": environment["name"], "fields": sorted(fields.keys())},
+                self.client_address[0],
+            )
+        return {"message": "环境信息已更新", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
+
+    def delete_environment(self, environment_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            environment = self.find_environment(conn, environment_id, admin)
+            if environment["current_user_id"]:
+                raise AppError(409, "该环境当前有人占用，请先交接或释放后再删除")
+            usage_count = conn.execute(
+                "SELECT COUNT(*) AS count FROM environment_usages WHERE environment_id=?",
+                (environment_id,),
+            ).fetchone()["count"]
+            # 软删除进回收站：环境台账写错一行是常事，硬删会让占用历史跟着消失。
+            conn.execute(
+                "UPDATE environments SET deleted_at=?, deleted_by=?, updated_at=? WHERE id=?",
+                (now_iso(), admin["id"], now_iso(), environment_id),
+            )
+            add_recycle_record(
+                conn,
+                "environment",
+                environment_id,
+                environment["name"],
+                admin,
+                {"name": environment["name"], "host": environment["host"], "usages": usage_count},
+            )
+            write_audit(
+                conn,
+                admin,
+                "environment.delete",
+                "environment",
+                environment_id,
+                "环境已删除",
+                {"name": environment["name"], "usages": usage_count},
+                self.client_address[0],
+            )
+        return {"message": "环境已删除", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
+
+    def occupy_environment(self, environment_id, user=None):
+        """Claim a free environment for the current user.
+
+        Occupying is a personal action every signed-in member may perform, so it is
+        gated on the login only — the module's create/edit/delete permissions describe
+        who maintains the *ledger*, not who may sit at a keyboard.
+
+        **Only a free environment can be claimed.** Taking one that somebody else is
+        using is refused (409) rather than treated as a handover: a handover means
+        the current holder agrees to it, and a unilateral overwrite would silently cut
+        their session short while the ledger showed them as the one who gave it up.
+        The agreed path is for the holder to press 「释放」, after which the machine is
+        free and anyone can take it; an administrator can also release on their behalf
+        when they are offline. Because a claim always starts from a free row, the
+        outgoing-usage bookkeeping from the old takeover path is gone: there is exactly
+        one open usage row per occupied environment, and it belongs to the holder.
+        """
+        actor = user or self.current_user()
+        data = read_json(self)
+        note = str(data.get("note") or "").strip()
+        if len(note) > 200:
+            raise AppError(400, "备注请控制在 200 字以内")
+        expected = normalize_expected_return(data.get("expected_return_at")) or None
+        stamp = now_iso()
+        with connect() as conn:
+            environment = self.find_environment(conn, environment_id, actor)
+            if environment["current_user_id"] == actor["id"]:
+                raise AppError(409, "你已经占用着这台环境")
+            if environment["current_user_id"]:
+                holder = conn.execute(
+                    "SELECT display_name FROM users WHERE id=?",
+                    (environment["current_user_id"],),
+                ).fetchone()
+                who = (holder["display_name"] if holder else "其他成员")
+                raise AppError(409, f"这台环境正由「{who}」占用，请等 TA 释放后再占用")
+            cursor = conn.execute(
+                """
+                INSERT INTO environment_usages(
+                    org_unit_id, environment_id, user_id, occupied_at, expected_return_at, note, created_by, created_at
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (environment["org_unit_id"], environment_id, actor["id"], stamp, expected or None, note, actor["id"], stamp),
+            )
+            conn.execute(
+                """
+                UPDATE environments
+                SET current_user_id=?, occupied_at=?, expected_return_at=?, occupancy_note=?, updated_at=?
+                WHERE id=?
+                """,
+                (actor["id"], stamp, expected or None, note, stamp, environment_id),
+            )
+            write_audit(
+                conn,
+                actor,
+                "environment.occupy",
+                "environment",
+                environment_id,
+                "环境已占用",
+                {
+                    "environment": environment["name"],
+                    "to_user_id": actor["id"],
+                    "usage_id": cursor.lastrowid,
+                },
+                self.client_address[0],
+            )
+        return {
+            "message": "环境已占用",
+            "environments": self.list_environments(actor),
+            "summary": self.environment_summary(actor),
+        }
+
+    def release_environment(self, environment_id, user=None):
+        """Give the environment back. Only the current holder (or an admin) may do it."""
+        actor = user or self.current_user()
+        with connect() as conn:
+            environment = self.find_environment(conn, environment_id, actor)
+            if not environment["current_user_id"]:
+                raise AppError(409, "这台环境当前是空闲的")
+            holder_id = int(environment["current_user_id"])
+            is_admin = actor.get("role") == "admin"
+            if holder_id != int(actor["id"]) and not is_admin:
+                raise AppError(403, "只能释放自己占用的环境，管理员可代为释放")
+            stamp = now_iso()
+            conn.execute(
+                """
+                UPDATE environment_usages
+                SET released_at=?
+                WHERE environment_id=? AND user_id=? AND released_at IS NULL
+                """,
+                (stamp, environment_id, holder_id),
+            )
+            conn.execute(
+                """
+                UPDATE environments
+                SET current_user_id=NULL, occupied_at=NULL, expected_return_at=NULL,
+                    occupancy_note=NULL, updated_at=?
+                WHERE id=?
+                """,
+                (stamp, environment_id),
+            )
+            write_audit(
+                conn,
+                actor,
+                "environment.release",
+                "environment",
+                environment_id,
+                "环境已释放",
+                {"environment": environment["name"], "holder_id": holder_id, "released_by_admin": is_admin and holder_id != int(actor["id"])},
+                self.client_address[0],
+            )
+        return {"message": "环境已释放", "environments": self.list_environments(actor), "summary": self.environment_summary(actor)}
 
     def list_thank_you(self, query, viewer=None):
         where, params = date_filter(query, "v.week_start")

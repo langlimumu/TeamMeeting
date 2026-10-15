@@ -115,7 +115,7 @@ data/deploy/runtime/                  # 进程元数据和日志
 | `norm_images` | 规范正文的插图：**只存相对路径**，图片本体在 `data/uploads/norms/YYYY/MM/` 下；`norm_id` 为空表示「已上传但还没被任何条款引用」的暂存图；`deleted_at` 是软删，规范删除会进回收站、可以恢复，硬删图片会让恢复后裂图 |
 | `norm_doc_versions` | 预留表：统一规范文档的发布快照结构（版本号、生效日期、修订说明、章节全文、变更摘要），**当前版本不读写** |
 
-规范文档不是独立编辑的文本，而是 `norms` 的实时投影：**每个分类各自成一份文档**，条款号是**份内序号**（`1`、`2`、`3`…），每份文档都从 `1` 重新排，不带分类前缀；文档之间靠 `category_id` 与标题区分。没有草稿/正式版的区分，也没有发布快照。`norm_doc_versions` 仅在建表语句中保留，供将来引入版本管理时使用——这样老库无需迁移，也没有任何接口依赖它。`status` 取值为 `active`、`pending`（管理员复核标记）、`abolished`；只有 `active` 且未过 `effective_to` 的条目进入文档。分类下仍有未删除条目时不允许删除该分类（走 API 停用也同样受此限制）。
+规范文档不是独立编辑的文本，而是 `norms` 的实时投影：**每个分类各自成一份文档**，条款号是**份内序号**（`1`、`2`、`3`…），每份文档都从 `1` 重新排，不带分类前缀；文档之间靠 `category_id` 与标题区分。没有草稿/正式版的区分，也没有发布快照。`norm_doc_versions` 仅在建表语句中保留，供将来引入版本管理时使用——这样老库无需迁移，也没有任何接口依赖它。**条目只有「存在 / 已删除」两态**：只要 `deleted_at IS NULL` 就进文档，记下来即生效，删除进回收站可恢复。`status`（`active` / `pending` / `abolished`）与 `effective_from` / `effective_to` **列仍在建表语句里但已无任何读写路径**——写入接口无条件写 `status='active'`、日期留空，读取不再按它们过滤；旧库里那些 `abolished` / `pending` / 已过期的行会**全部重新进入文档**，这正是两态模型想要的效果。分类下仍有未删除条目时不允许删除该分类（走 API 停用也同样受此限制）。
 
 **两级目录**：一级目录下可以再建子目录（如「研发流程」下的「python研发流程」），**两级都能直接放条款**。父目录与子目录各自成一份独立文档，父目录文档**只显示直属条款**，不会把子目录的条款并进来；`parent_id` 只用于导航缩进。层级上限固定为 2：新增/移动目录时若上级本身已是二级目录，会返回 400。删除一级目录时，只要它下面还有子目录就返回 409，必须先移走或删除子目录（走 API 停用同样受限）。
 
@@ -124,6 +124,23 @@ data/deploy/runtime/                  # 进程元数据和日志
 老库升级不需要手工迁移：`parent_id` 与 `created_by` 都由 `ensure_column` 补列（存量分类全部落到一级、`created_by` 留空即当作系统预置），启动时 `DROP INDEX IF EXISTS idx_norm_categories_unit_name` 换建成按 parent 作用域的唯一索引——旧索引范围更宽，换成范围更窄的索引不会因既有数据冲突。`data\weekly_team.db` 这类老库直接启动即可。
 
 **插图为什么不进库**：`norm_images` 只存相对路径，字节落在 `data/uploads/norms/YYYY/MM/` 下。`scripts/db_snapshot.py` 用 `sqlite3.backup()` 整库逐页复制并跑一遍 `PRAGMA integrity_check` 全库校验，而 `deploy.ps1` 一次完整上线要生成两遍快照（灰度阶段拷正式库、Promote 阶段备份正式库）、回滚还要第三遍——图片进库会让这些操作的开销随图片量线性增长，`data/backups/` 里也会堆起同等体积的完整副本。`data/` 同时是唯一被部署流程排除的目录（手工覆盖用 `robocopy /MIR /XD data`；release 快照只拷 `server.py`、`team_loop`、`static`、`previews`），上传文件放这里既不会被发布快照固化，也不会被镜像同步删掉。这张表不需要迁移：`CREATE TABLE IF NOT EXISTS` 与 `idx_norm_images_norm`、`idx_norm_images_orphan` 两个索引在启动时自动补齐，存量数据一条不动。
+
+### 环境管理
+
+| 表 | 用途 |
+| --- | --- |
+| `environments` | 一台服务器一行：连接信息（`name` / `host` / `username` / `password` / `vnc_port` / `purpose`）加上**当前**占用状态（`current_user_id` / `occupied_at` / `expected_return_at` / `occupancy_note`）；`deleted_at` 是软删，删除进回收站可恢复 |
+| `environment_usages` | 每一次占用一段：`occupied_at` / `released_at` / `note`，只追加不修改，是这台机器的占用流水 |
+
+`expected_return_at` 存的是**ISO 时刻**（不是日期）：写入时 `normalize_expected_return()` 把裸日期按「当天 23:59:59」展开，于是「是否已过期」是一次时间比较而非两条代码路径。列本身是 `TEXT`，换成时刻**不需要迁移**，存量日期行照常可读。
+
+**两张表刻意分开**：当前占用是会变的**状态**，占用历史是只追加的**流水**。释放的动作在同一个事务里做两件事——把当前这段 `environment_usages` 写上 `released_at`、清空 `environments` 上的占用字段；占用反过来做。于是每台被占用的机器**有且只有一段 open 记录**，「一台机器同时显示两个人在用」和「一条永远 open 的记录」这两类脏数据在结构上就不可能出现，代价是 handler 必须保证这两步原子。**只有空闲的机器才能被占用**（强行接管返回 409），所以不需要「抢占时先收口上一段」那套逻辑。
+
+**密码明文存明文下发**是按团队要求定的（内部台账，卡片上直接读凭据是常态），所以防护落在**可见性**而不是加密上：访客模板里 `environments` 连 `can_view` 都不给，`scripts/smoke_test.py` 里有一条反向断言确保匿名请求拿不到 200。加字段加密只能挡住「拿到库文件的人」，挡不住「登录后正常看页面的人」，反而会引入一把没人保管的密钥——那才是真正的风险。默认用户类型在 `environments` 上只给 view（`create`/`edit`/`delete` 全 0），台账的增删改由 handler 里的 `require_admin()` 兜底，所以数据库里也不会混进普通成员建的环境。
+
+删除走软删除进回收站，但**恢复时只清空当前占用、不动历史**：占用人可能早就换人了，硬把旧的 `current_user_id` 挂回去等于凭空冒出一段没人确认过的占用。
+
+老库升级不需要手工迁移：两张表都是 `CREATE TABLE IF NOT EXISTS`，新建时自动补齐并建好 `idx_environments_unit` / `idx_environments_holder` / `idx_environment_usages_env` / `idx_environment_usages_user` 四个索引，存量数据一条不动。
 
 ### 系统治理
 

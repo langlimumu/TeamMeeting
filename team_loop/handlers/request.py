@@ -548,6 +548,8 @@ class RequestHandlerMixin:
             return "norms"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
+        if path.startswith("/api/environments"):
+            return "environments"
         if path.startswith("/api/settings") or path.startswith("/api/sso/diagnose") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
             return "system"
         if path.startswith("/api/team-replies"):
@@ -649,6 +651,13 @@ class RequestHandlerMixin:
         # delete_norm 按 created_by 判定，删别人的东西照样 403。
         if method == "DELETE" and (path.startswith("/api/norm-categories/") or path.startswith("/api/norms/")):
             action = "edit"
+        # 环境的「占用 / 释放」是每个人对自己做的事，跟模块的 create/edit/delete 无关：
+        # 一个用户类型可以完全不给 environments 的 create/edit/delete（只留 view），
+        # 照样要能点占用。所以这两个动作一律按 **view** 放行——默认类型正是只有 view，
+        # 用 edit/create 放行会把普通成员挡在门外，真正的判定放在 handler 里
+        # （登录 + 团队范围 + 释放时还得是自己占的）。
+        if method == "POST" and path.startswith("/api/environments/") and path.rstrip("/").endswith(("/occupy", "/release")):
+            action = "view"
         self.require_module(user, self.module_for_path(path), action)
 
         if path == "/api/team-posts":
@@ -948,6 +957,28 @@ class RequestHandlerMixin:
                 return self.delete_thank_you(int(parts[2]), user)
         if path == "/api/dashboards/thank-you" and method == "GET":
             return self.thank_you_dashboard(query, user)
+
+        if path == "/api/environments":
+            if method == "GET":
+                return {
+                    "environments": self.list_environments(user),
+                    "summary": self.environment_summary(user),
+                }
+            if method == "POST":
+                return self.create_environment()
+        if len(parts) == 3 and parts[:2] == ["api", "environments"]:
+            if method == "GET":
+                return self.get_environment_detail(int(parts[2]), user)
+            if method == "PATCH":
+                return self.update_environment(int(parts[2]))
+            if method == "DELETE":
+                return self.delete_environment(int(parts[2]))
+        # 占用与释放是**每个登录用户的日常动作**，不属于模块的 create/edit/delete：
+        # 路由把它们一律按 edit 放行，真正的判定在 handler 里（登录 + 是本人占用才能释放）。
+        if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "occupy" and method == "POST":
+            return self.occupy_environment(int(parts[2]), user)
+        if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "release" and method == "POST":
+            return self.release_environment(int(parts[2]), user)
 
         if path == "/api/reminders" and method == "GET":
             return self.list_reminders(user)

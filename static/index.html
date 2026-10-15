@@ -484,6 +484,61 @@
             </div>
           </div>
 
+          <div id="environmentModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="environmentModalTitle" aria-hidden="true">
+            <div class="modal-card environment-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="environmentModalTitle">新增环境</h2>
+                  <p>环境连接信息由管理员维护；填好后所有有权限的成员都能看到并点占用。</p>
+                </div>
+                <button class="modal-close" type="button" data-environment-modal-close aria-label="关闭">×</button>
+              </div>
+              <form id="environmentForm" class="form-grid">
+                <input type="hidden" name="environment_id" value="" />
+                <label>环境名称<input name="name" placeholder="如：dev-01 / 测试机A" maxlength="40" required /></label>
+                <label>IP 或主机名<input name="host" placeholder="如：192.168.1.20" maxlength="120" required /></label>
+                <label>登录账号<input name="username" placeholder="如：team" maxlength="60" required /></label>
+                <label>登录密码<input name="password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" placeholder="登录密码（选填）" /></label>
+                <label>VNC 端口<input name="vnc_port" type="number" min="1" max="65535" placeholder="如：5901" /></label>
+                <label>用途备注<input name="purpose" placeholder="用途或注意事项（选填）" maxlength="200" /></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-environment-modal-close>取消</button>
+                  <button id="environmentSubmitBtn" type="submit">创建环境</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="environmentOccupyModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="environmentOccupyTitle" aria-hidden="true">
+            <div class="modal-card environment-occupy-modal-card">
+              <div class="modal-head">
+                <div>
+                  <h2 id="environmentOccupyTitle">占用环境</h2>
+                  <p id="environmentOccupyHint"></p>
+                </div>
+                <button class="modal-close" type="button" data-environment-occupy-close aria-label="关闭">×</button>
+              </div>
+              <form id="environmentOccupyForm" class="form-grid">
+                <input type="hidden" name="environment_id" value="" />
+                <div class="env-return-block">
+                  <label class="env-return-label">预计归还时间</label>
+                  <!-- 原生 datetime-local 的弹层里没有「确定」，选完只能靠下面的回显
+                       告诉用户值已经进去了；常用时刻另有快捷按钮，多数时候不用开日历。 -->
+                  <div class="env-return-row">
+                    <input name="expected_return_at" type="datetime-local" step="1" />
+                    <button class="env-return-clear" type="button" data-env-return-clear title="清除预计归还时间">清除</button>
+                  </div>
+                  <p class="env-return-echo" id="environmentReturnEcho" role="status" aria-live="polite"></p>
+                </div>
+                <label>备注<input name="note" placeholder="用途说明（选填）" maxlength="200" /></label>
+                <div class="modal-actions">
+                  <button class="secondary" type="button" data-environment-occupy-close>取消</button>
+                  <button type="submit">确认占用</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
           <section id="members" class="page active">
             <section class="member-layout" id="memberList"></section>
             <section class="panel team-forum-panel">
@@ -1236,6 +1291,31 @@
 
               </aside>
             </section>
+          </section>
+
+          <section id="environments" class="page">
+            <section class="panel env-head-panel">
+              <div class="panel-title">
+                <div>
+                  <h2>环境管理</h2>
+                  <p>一台服务器一张卡片，卡片上直接写清连接信息与当前使用人；点「占用」即记到自己名下，交接后自动换人并留下记录。</p>
+                </div>
+                <div class="env-head-actions">
+                  <div class="env-filters">
+                    <button class="secondary is-active" type="button" data-env-filter="all">全部</button>
+                    <button class="secondary" type="button" data-env-filter="free">空闲</button>
+                    <button class="secondary" type="button" data-env-filter="busy">使用中</button>
+                    <button class="secondary" type="button" data-env-filter="mine">我占用的</button>
+                  </div>
+                  <button id="environmentAddBtn" type="button">＋ 新增环境</button>
+                </div>
+              </div>
+              <div id="environmentStats" class="env-stats"></div>
+            </section>
+
+            <section class="panel env-detail-panel hidden" id="environmentDetail"></section>
+
+            <div id="environmentCards" class="env-card-wall"></div>
           </section>
 
           <section id="rules" class="page">

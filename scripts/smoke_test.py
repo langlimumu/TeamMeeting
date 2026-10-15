@@ -69,6 +69,43 @@ def request(base_url: str, path: str, expect_json: bool = True):
     return body.decode("utf-8", errors="replace")
 
 
+def request_status(base_url: str, path: str) -> int:
+    """Status code only — for endpoints that must NOT be anonymous.
+
+    `request()` raises on anything but 200, which is exactly what a negative
+    assertion needs to tell apart, so this one reports the code instead.
+    """
+    parsed = urlsplit(base_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 80
+    request_bytes = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}:{port}\r\n"
+        "Connection: close\r\n"
+        "Accept: application/json\r\n\r\n"
+    ).encode("ascii")
+    try:
+        with socket.create_connection((host, port), timeout=10) as connection:
+            connection.sendall(request_bytes)
+            chunks = []
+            while True:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError as exc:
+        raise RuntimeError(f"{path} is unavailable: {exc}") from exc
+    response = b"".join(chunks)
+    headers, separator, _ = response.partition(b"\r\n\r\n")
+    if not separator:
+        raise RuntimeError(f"{path} returned an invalid HTTP response")
+    status_line = headers.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+    try:
+        return int(status_line.split()[1])
+    except (IndexError, ValueError) as exc:
+        raise RuntimeError(f"{path} returned an invalid status line: {status_line}") from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run read-only Team Loop deployment smoke tests")
     parser.add_argument("--base-url", required=True)
@@ -110,6 +147,15 @@ def main() -> None:
                 "so its read endpoint must answer without a login"
             ) from exc
         probed.append({"module": module, "path": path})
+
+    # 环境管理是**唯一一个带服务器密码的模块**，它故意不给访客 view。上面的正向断言
+    # 覆盖不到它（没配读接口就跳过了），所以这里显式反向断言一次：即使有人日后在
+    # 「用户类型」里误勾了访客可见，发布闸门也要在这里响。
+    guest_environments_status = request_status(args.base_url, "/api/environments")
+    if guest_environments_status == 200:
+        raise RuntimeError(
+            "/api/environments must never answer without a login — it carries server credentials"
+        )
 
     print(json.dumps({"status": "ok", "health": health, "guest_modules": probed}, ensure_ascii=False))
 
