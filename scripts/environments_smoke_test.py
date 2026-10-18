@@ -91,6 +91,7 @@ def main():
                 "username": "team",
                 "password": "P@ssw0rd-01",
                 "vnc_port": 5901,
+                "vnc_password": "vnc12345",
                 "purpose": "日常联调，需先连 VPN",
             })
             environments = created["environments"]
@@ -102,6 +103,30 @@ def main():
             # 密码按团队要求明文下发（内部台账，卡片上直接读凭据是常态）。
             if dev["password"] != "P@ssw0rd-01" or dev["vnc_port"] != 5901:
                 raise RuntimeError(f"Credentials must round-trip: {dev}")
+            # VNC 密码是**独立**的一列，且与系统密码互不相干（真实场景里它由 vncpasswd
+            # 设置、上限 8 位，跟登录密码经常不是一个东西）。
+            if dev["vnc_password"] != "vnc12345":
+                raise RuntimeError(f"The VNC password must be its own field: {dev}")
+            if "lch" not in dev or dev["lch"] != []:
+                raise RuntimeError(f"A fresh environment must carry an empty sub-machine list: {dev}")
+
+            # 不填 VNC 密码就是空串（= 不单独设），不是回落到系统密码。
+            without_vnc = request_json(admin, f"{base_url}/api/environments", "POST", {
+                "name": "no-vnc", "host": "192.168.10.40", "username": "team", "password": "same",
+            })["environments"][-1]
+            if without_vnc["vnc_password"] != "":
+                raise RuntimeError(f"Blank VNC password must stay blank: {without_vnc}")
+
+            # 密码字段的口径与 password 一致：**不发这个字段 = 不改，显式发空串 = 清空**
+            # （前端表单在留空时压根不发这个字段，所以「留空不改」由前端保证，
+            #   后端保持「显式清空」这个能力——不然永远没法把某台机器的密码删掉）。
+            request_json(admin, f"{base_url}/api/environments/{dev['id']}", "PATCH", {"purpose": "改了备注"})
+            if find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["vnc_password"] != "vnc12345":
+                raise RuntimeError("An unrelated PATCH must not clear the VNC password")
+            request_json(admin, f"{base_url}/api/environments/{dev['id']}", "PATCH", {"vnc_password": "vnc67890"})
+            if find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["vnc_password"] != "vnc67890":
+                raise RuntimeError("The VNC password must be settable")
+            request_json(admin, f"{base_url}/api/environments/{without_vnc['id']}", "DELETE")
 
             request_json(member, f"{base_url}/api/environments", "POST", {
                 "name": "成员想加的环境", "host": "192.168.10.99", "username": "team",
@@ -214,6 +239,93 @@ def main():
             dev = find_environment(released["environments"], "dev-01")
             if dev["occupied"]:
                 raise RuntimeError(f"An admin must be able to release someone else's hold: {dev}")
+
+            # ---- 下位机（LCH）：只读附属，占用单位仍是父服务器 ----
+            with_lch = request_json(admin, f"{base_url}/api/environments/{dev['id']}/lch", "POST", {
+                "host": "10.0.0.31", "username": "lch_a", "password": "lch-secret",
+            })
+            lch_row = find_environment(with_lch["environments"], "dev-01")["lch"]
+            if len(lch_row) != 1 or lch_row[0]["host"] != "10.0.0.31" or lch_row[0]["password"] != "lch-secret":
+                raise RuntimeError(f"A sub-machine must round-trip with its credentials: {lch_row}")
+            lch_id = lch_row[0]["id"]
+            request_json(admin, f"{base_url}/api/environments/{dev['id']}/lch", "POST", {
+                "host": "10.0.0.32", "username": "lch_b",
+            })
+            lch_rows = find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["lch"]
+            if len(lch_rows) != 2 or lch_rows[1]["password"] != "":
+                raise RuntimeError(f"A second sub-machine must be added with a blank password: {lch_rows}")
+
+            # 下位机**不能单独占用**：路由里根本没有 occupy / release 入口（落到闸门上
+            # 403 或未匹配 404 都算「不存在这个动作」），占用状态也只挂在父机上。
+            for blocked in ("occupy", "release"):
+                try:
+                    request_json(member, f"{base_url}/api/environment-lch/{lch_id}/{blocked}", "POST", {})
+                except RuntimeError as exc:
+                    # 闸门先拦（403）或路由不匹配（404）都算「没有这个动作」；
+                    # 唯一不能接受的是 200 —— 那说明下位机真的能被单独占用。
+                    if "returned 200" in str(exc):
+                        raise RuntimeError(f"Sub-machines must not be occupiable ({blocked}): {exc}")
+            if any("current_user_id" in row for row in lch_rows):
+                raise RuntimeError(f"A sub-machine must carry no occupancy of its own: {lch_rows}")
+
+            # 下位机的增删改与台账同权：仅管理员。
+            request_json(member, f"{base_url}/api/environments/{dev['id']}/lch", "POST", {
+                "host": "10.0.0.33", "username": "x",
+            }, 403)
+            request_json(member, f"{base_url}/api/environment-lch/{lch_id}", "PATCH", {"host": "10.0.0.99"}, 403)
+            request_json(member, f"{base_url}/api/environment-lch/{lch_id}", "DELETE", expected=403)
+            # 但普通成员**能读**下位机的凭据（跟读父机密码同一条规则）。
+            member_lch = find_environment(
+                request_json(member, f"{base_url}/api/environments")["environments"], "dev-01"
+            )["lch"]
+            if len(member_lch) != 2 or member_lch[0]["password"] != "lch-secret":
+                raise RuntimeError(f"A member must be able to read sub-machine credentials: {member_lch}")
+
+            # 非法值挡在库外。
+            request_json(admin, f"{base_url}/api/environments/{dev['id']}/lch", "POST", {"host": "", "username": "a"}, 400)
+            request_json(admin, f"{base_url}/api/environments/{dev['id']}/lch", "POST", {"host": "1 0.0.0.1", "username": "a"}, 400)
+            request_json(admin, f"{base_url}/api/environments/{dev['id']}/lch", "POST", {"host": "10.0.0.1", "username": ""}, 400)
+            request_json(admin, f"{base_url}/api/environment-lch/99999", "PATCH", {"host": "10.0.0.1"}, 404)
+
+            # 改 IP 不动密码（不发 password 字段 = 不改）。
+            request_json(admin, f"{base_url}/api/environment-lch/{lch_id}", "PATCH", {"host": "10.0.0.41"})
+            lch_rows = find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["lch"]
+            if lch_rows[0]["host"] != "10.0.0.41" or lch_rows[0]["password"] != "lch-secret":
+                raise RuntimeError(f"Editing the IP must not touch the sub-machine password: {lch_rows}")
+
+            # 单删下位机进回收站，可恢复。
+            recycle_before = len(request_json(admin, f"{base_url}/api/recycle-bin")["items"])
+            request_json(admin, f"{base_url}/api/environment-lch/{lch_id}", "DELETE")
+            lch_rows = find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["lch"]
+            if len(lch_rows) != 1:
+                raise RuntimeError(f"A deleted sub-machine must disappear: {lch_rows}")
+            recycle = request_json(admin, f"{base_url}/api/recycle-bin")["items"]
+            if len(recycle) != recycle_before + 1:
+                raise RuntimeError(f"A sub-machine deletion must reach the recycle bin: {recycle}")
+            lch_item = next(item for item in recycle if item["entity_type"] == "environment_lch")
+            if lch_item["entity_label"] != "下位机":
+                raise RuntimeError(f"The recycle bin must label it: {lch_item}")
+            request_json(admin, f"{base_url}/api/recycle-bin/{lch_item['id']}/restore", "POST")
+            lch_rows = find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["lch"]
+            if len(lch_rows) != 2 or lch_rows[0]["host"] != "10.0.0.41":
+                raise RuntimeError(f"A restored sub-machine must come back intact: {lch_rows}")
+
+            # 删除父环境会级联软删下位机；恢复父环境时下位机必须一起回来（否则主机是空的）。
+            if find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")["occupied"]:
+                request_json(member, f"{base_url}/api/environments/{dev['id']}/release", "POST")
+            cascade = request_json(admin, f"{base_url}/api/environments/{dev['id']}", "DELETE")
+            if any(item["name"] == "dev-01" for item in cascade["environments"]):
+                raise RuntimeError(f"The deleted environment must disappear: {cascade['environments']}")
+            env_item = next(
+                item for item in request_json(admin, f"{base_url}/api/recycle-bin")["items"]
+                if item["entity_type"] == "environment"
+            )
+            request_json(admin, f"{base_url}/api/recycle-bin/{env_item['id']}/restore", "POST")
+            restored = find_environment(request_json(admin, f"{base_url}/api/environments")["environments"], "dev-01")
+            if len(restored["lch"]) != 2:
+                raise RuntimeError(f"Restoring the environment must bring its sub-machines back: {restored['lch']}")
+            if restored["occupied"]:
+                raise RuntimeError(f"Restoring must still clear the occupancy: {restored}")
 
             # ---- 不能强行接管：别人占着就占不上，必须先由占用人释放 ----
             request_json(member, f"{base_url}/api/environments/{dev['id']}/occupy", "POST", {"note": "第一段"})
@@ -341,8 +453,11 @@ def main():
 
     print(
         "环境管理冒烟测试通过：台账增删改仅管理员（成员一律 403）、重名与非法 host/端口 400、"
-        "密码明文下发与「留空不改」、一键占用空闲机器、**预计归还精确到秒且裸日期按当天 23:59:59、"
-        "过了时刻计入 overdue**、只能释放自己的占用（管理员可代释）、"
+        "**VNC 密码独立一列（留空=不单独设、不发字段=不改、显式空串=清空）**、"
+        "**下位机（只有 IP/账号/密码）增删改仅管理员但成员可读、不能被单独占用、"
+        "删父级联删且恢复时一起回来、单删进回收站可恢复**、"
+        "密码明文下发、预计归还精确到秒且裸日期按当天 23:59:59、过了时刻计入 overdue、"
+        "只能释放自己的占用（管理员可代释）、"
         "**别人在用时强行占用被拒（管理员也不例外）且状态零改动**、占用中有占用不许删除、"
         "软删除进回收站并恢复（清占用但保历史）、访客完全不可见均符合预期。"
     )

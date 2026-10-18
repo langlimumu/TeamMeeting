@@ -148,6 +148,16 @@ def main() -> None:
             ) from exc
         probed.append({"module": module, "path": path})
 
+    # 左侧导航顺序存在 public_settings 里，所以**连未登录的访客**都必须拿得到它 ——
+    # 少了这个键，导航会退回默认顺序，而且只有普通成员会发现（管理员读的是另一份
+    # settings），这种「一部分人行为不同」的 bug 极难复现。
+    public_settings = request(args.base_url, "/api/me").get("settings") or {}
+    if "nav_order" not in public_settings:
+        raise RuntimeError(
+            "public_settings must carry nav_order — without it the sidebar silently "
+            "falls back to the built-in order for every non-admin"
+        )
+
     # 环境管理是**唯一一个带服务器密码的模块**，它故意不给访客 view。上面的正向断言
     # 覆盖不到它（没配读接口就跳过了），所以这里显式反向断言一次：即使有人日后在
     # 「用户类型」里误勾了访客可见，发布闸门也要在这里响。

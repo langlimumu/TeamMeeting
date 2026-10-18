@@ -1762,6 +1762,8 @@ class OperationsHandlerMixin:
             fields["username"] = username
         if "password" in data:
             fields["password"] = str(data.get("password") or "")
+        if "vnc_password" in data:
+            fields["vnc_password"] = str(data.get("vnc_password") or "")
         if "purpose" in data:
             purpose = str(data.get("purpose") or "").strip()
             if len(purpose) > 200:
@@ -1805,6 +1807,10 @@ class OperationsHandlerMixin:
         ledger and the team asked to read credentials straight off the card. That is
         also why the module is kept out of the guest view entirely (no `can_view` for
         guest), instead of hiding the field.
+
+        The sub-machines hang off the parent as `lch`: one extra query rather than a
+        join, because they are only ever read as a group under one card. They carry no
+        occupancy of their own — see the `environment_lch` DDL for why.
         """
         with connect() as conn:
             org_where, org_params = self.organization_current_entity_filter(conn, "e.org_unit_id", user)
@@ -1821,10 +1827,37 @@ class OperationsHandlerMixin:
                     org_params,
                 ).fetchall()
             )
+            by_environment = self.environment_lch_rows(conn, [row["id"] for row in rows], user)
         for row in rows:
             row["occupied"] = bool(row.get("current_user_id"))
             row["is_mine"] = bool(user and row.get("current_user_id") == user.get("id"))
+            row["lch"] = by_environment.get(row["id"], [])
         return rows
+
+    def environment_lch_rows(self, conn, environment_ids, user=None):
+        """Sub-machines of the given environments, grouped by environment_id.
+
+        A separate query instead of a LEFT JOIN because the card reads them as one
+        block per environment, and an empty list must still come back so the frontend
+        can tell "no sub-machines" from "not loaded".
+        """
+        grouped = {environment_id: [] for environment_id in environment_ids}
+        if not environment_ids:
+            return grouped
+        org_where, org_params = self.organization_current_entity_filter(conn, "l.org_unit_id", user)
+        placeholders = ",".join("?" for _ in environment_ids)
+        rows = conn.execute(
+            f"""
+            SELECT l.* FROM environment_lch l
+            WHERE l.deleted_at IS NULL AND l.environment_id IN ({placeholders}) AND {org_where}
+            ORDER BY l.environment_id, l.sort_order, l.id
+            """,
+            [*environment_ids, *org_params],
+        ).fetchall()
+        for row in rows:
+            grouped.setdefault(row["environment_id"], []).append(row)
+        # sqlite3.Row can't be JSON-encoded; the payload goes straight out to the client.
+        return {key: [dict(row) for row in value] for key, value in grouped.items()}
 
     def environment_summary(self, user=None):
         rows = self.list_environments(user)
@@ -1958,6 +1991,12 @@ class OperationsHandlerMixin:
                 "UPDATE environments SET deleted_at=?, deleted_by=?, updated_at=? WHERE id=?",
                 (now_iso(), admin["id"], now_iso(), environment_id),
             )
+            # 下位机跟着软删，但不能进回收站**单独**恢复——父机恢复时下位机必须一起回来，
+            # 否则会出现「主机不在、孤儿下位机还在」的数据。所以这里不写回收站记录。
+            conn.execute(
+                "UPDATE environment_lch SET deleted_at=?, deleted_by=? WHERE environment_id=? AND deleted_at IS NULL",
+                (now_iso(), admin["id"], environment_id),
+            )
             add_recycle_record(
                 conn,
                 "environment",
@@ -1977,6 +2016,111 @@ class OperationsHandlerMixin:
                 self.client_address[0],
             )
         return {"message": "环境已删除", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
+
+    # ------------------------------------------------------------ sub-machines
+    # 挂在某台服务器下的下位机（LCH 等）。只有 IP / 账号 / 密码三样，且**不能单独占用**
+    # —— 占用单位是父服务器。这样「谁在用这台机器」永远只有一个答案，不会出现
+    # 「父机张三、下位机李四」这种没人说得清的组合。
+
+    def find_environment_lch(self, conn, lch_id, user=None):
+        org_where, org_params = self.organization_current_entity_filter(conn, "l.org_unit_id", user)
+        row = conn.execute(
+            f"SELECT l.* FROM environment_lch l WHERE l.id=? AND l.deleted_at IS NULL AND {org_where}",
+            [lch_id, *org_params],
+        ).fetchone()
+        if not row:
+            raise AppError(404, "下位机不存在")
+        return row
+
+    def environment_lch_fields(self, data):
+        fields = {}
+        host = str(data.get("host") or "").strip()
+        if not host:
+            raise AppError(400, "下位机 IP 不能为空")
+        if len(host) > 120 or any(char.isspace() for char in host):
+            raise AppError(400, "下位机 IP 格式不正确，请勿包含空格")
+        fields["host"] = host
+        username = str(data.get("username") or "").strip()
+        if not username:
+            raise AppError(400, "下位机账号不能为空")
+        fields["username"] = username
+        fields["password"] = str(data.get("password") or "")
+        return fields
+
+    def create_environment_lch(self, environment_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        fields = self.environment_lch_fields(data)
+        with connect() as conn:
+            environment = self.find_environment(conn, environment_id, admin)
+            conn.execute(
+                """
+                INSERT INTO environment_lch(
+                    org_unit_id, environment_id, host, username, password, sort_order, created_by, created_at
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    environment["org_unit_id"], environment_id, fields["host"], fields["username"],
+                    fields["password"], 0, admin["id"], now_iso(),
+                ),
+            )
+            lch_id = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+            write_audit(
+                conn, admin, "environment_lch.create", "environment", environment_id, "下位机已新增",
+                {"lch_id": lch_id, "host": fields["host"]}, self.client_address[0],
+            )
+        return {"message": "下位机已新增", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
+
+    def update_environment_lch(self, lch_id):
+        admin = self.require_admin()
+        data = read_json(self)
+        with connect() as conn:
+            lch = self.find_environment_lch(conn, lch_id, admin)
+            # 密码口径与 environments.password 一致：**不发 = 不改，显式发空串 = 清空**。
+            # 前端表单留空时压根不发这个字段，所以「留空不改」由前端保证；后端保留
+            # 「显式清空」的能力，否则永远没法把某台下位机的密码删掉。
+            if any(key in data for key in ("host", "username")):
+                fields = self.environment_lch_fields({**dict(lch), **data})
+            else:
+                fields = {}
+            if "password" in data:
+                fields["password"] = str(data.get("password") or "")
+            conn.execute(
+                "UPDATE environment_lch SET host=?, username=?, password=? WHERE id=?",
+                (
+                    fields.get("host", lch["host"]),
+                    fields.get("username", lch["username"]),
+                    fields.get("password", lch["password"]),
+                    lch_id,
+                ),
+            )
+            write_audit(
+                conn, admin, "environment_lch.update", "environment", lch["environment_id"], "下位机已更新",
+                {"lch_id": lch_id, "host": fields.get("host", lch["host"])}, self.client_address[0],
+            )
+        return {"message": "下位机已更新", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
+
+    def delete_environment_lch(self, lch_id):
+        admin = self.require_admin()
+        with connect() as conn:
+            lch = self.find_environment_lch(conn, lch_id, admin)
+            conn.execute(
+                "UPDATE environment_lch SET deleted_at=?, deleted_by=? WHERE id=?",
+                (now_iso(), admin["id"], lch_id),
+            )
+            add_recycle_record(
+                conn,
+                "environment_lch",
+                lch_id,
+                f"{lch['host']}（下位机）",
+                admin,
+                {"host": lch["host"], "environment_id": lch["environment_id"]},
+            )
+            write_audit(
+                conn, admin, "environment_lch.delete", "environment", lch["environment_id"], "下位机已删除",
+                {"lch_id": lch_id, "host": lch["host"]}, self.client_address[0],
+            )
+        return {"message": "下位机已删除", "environments": self.list_environments(admin), "summary": self.environment_summary(admin)}
 
     def occupy_environment(self, environment_id, user=None):
         """Claim a free environment for the current user.

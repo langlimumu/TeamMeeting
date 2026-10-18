@@ -548,7 +548,7 @@ class RequestHandlerMixin:
             return "norms"
         if path.startswith("/api/thank-you") or path.startswith("/api/dashboards/thank-you"):
             return "thanks"
-        if path.startswith("/api/environments"):
+        if path.startswith("/api/environments") or path.startswith("/api/environment-lch"):
             return "environments"
         if path.startswith("/api/settings") or path.startswith("/api/sso/diagnose") or path.startswith("/api/audit-logs") or path.startswith("/api/backups") or path.startswith("/api/recycle-bin"):
             return "system"
@@ -979,6 +979,15 @@ class RequestHandlerMixin:
             return self.occupy_environment(int(parts[2]), user)
         if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "release" and method == "POST":
             return self.release_environment(int(parts[2]), user)
+        # 下位机：挂在环境下面，写操作与台账同权（仅管理员），路径刻意不带 occupy /
+        # release —— 它不能被单独占用，少一个入口就少一次「能不能占用它」的争论。
+        if len(parts) == 4 and parts[:2] == ["api", "environments"] and parts[3] == "lch" and method == "POST":
+            return self.create_environment_lch(int(parts[2]))
+        if len(parts) == 3 and parts[:2] == ["api", "environment-lch"]:
+            if method == "PATCH":
+                return self.update_environment_lch(int(parts[2]))
+            if method == "DELETE":
+                return self.delete_environment_lch(int(parts[2]))
 
         if path == "/api/reminders" and method == "GET":
             return self.list_reminders(user)

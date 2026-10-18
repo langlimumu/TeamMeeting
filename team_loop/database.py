@@ -1404,6 +1404,9 @@ def init_db():
                 username TEXT NOT NULL,
                 password TEXT NOT NULL DEFAULT '',
                 vnc_port INTEGER,
+                -- VNC 密码与系统登录密码常常不是一回事（vncpasswd 设的，上限 8 位），
+                -- 所以单独一列。留空 = 不单独设，与 username/password 同一套。
+                vnc_password TEXT NOT NULL DEFAULT '',
                 purpose TEXT,
                 current_user_id INTEGER REFERENCES users(id),
                 occupied_at TEXT,
@@ -1433,9 +1436,26 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
-            -- parent_id NULL = a top-level shelf; non-NULL = a sub-shelf of it. The tree is
-            -- deliberately capped at two levels: both levels hold norms and each category
-            -- owns its own document, so a third level would add no reading value.
+            -- 挂在某台服务器下的下位机（LCH 等）。**故意只有 IP / 账号 / 密码三样**：
+            -- 名称、端口、用途都是「人脑里的信息」，写进台账反而要维护，而实际用起来
+            -- 只关心「怎么连上去」。
+            -- 占用单位**仍然是父服务器**：这行没有 current_user_id，也没有自己的占用流水
+            -- —— 占了父机，它下面所有下位机都算占用人自己的。要独立占用就会引入
+            -- 「父机被占时下位机算不算被占」这套父子冲突，收益不值那个复杂度。
+            CREATE TABLE IF NOT EXISTS environment_lch (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_unit_id INTEGER NOT NULL REFERENCES org_units(id),
+                environment_id INTEGER NOT NULL REFERENCES environments(id),
+                host TEXT NOT NULL,
+                username TEXT NOT NULL,
+                password TEXT NOT NULL DEFAULT '',
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_by INTEGER REFERENCES users(id),
+                created_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by INTEGER
+            );
+
             -- created_by 记下「谁建的目录」：目录本人可以删，管理员可以删任何目录；
             -- 预置分类由系统建（created_by 为空），只有管理员能删。
             CREATE TABLE IF NOT EXISTS norm_categories (
@@ -1746,6 +1766,9 @@ def init_db():
         # 目录创建人：老库升级时既有分类（含 6 个预置分类）created_by 为空，当作系统建的，
         # 只有管理员能删——不给历史数据猜一个创建人。
         ensure_column(conn, "norm_categories", "created_by", "INTEGER")
+        # VNC 密码单独一列。存量行补空串 = 「不单独设」，与 username/password 同一套，
+        # 不给历史数据编一个 VNC 密码出来。
+        ensure_column(conn, "environments", "vnc_password", "TEXT NOT NULL DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_active ON auth_sessions(user_id, revoked_at, expires_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash)")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_identity ON users(auth_source, external_subject) WHERE external_subject IS NOT NULL AND external_subject<>''")
@@ -1765,6 +1788,8 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_environments_holder ON environments(org_unit_id, deleted_at, current_user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_environment_usages_env ON environment_usages(environment_id, occupied_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_environment_usages_user ON environment_usages(user_id, occupied_at DESC)")
+        # 下位机总是「按环境取一批、按顺序显示」：environment_id 打头，sort_order 收尾。
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_environment_lch_env ON environment_lch(environment_id, deleted_at, sort_order, id)")
         # 规范分类重名只在该「上级目录」内成立：不同上级下可以各有一个「python研发流程」。
         # 老库上的 (org_unit_id, name) 唯一索引范围过宽，先删掉再按 parent 建新的。
         conn.execute("DROP INDEX IF EXISTS idx_norm_categories_unit_name")

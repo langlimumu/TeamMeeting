@@ -129,8 +129,13 @@ data/deploy/runtime/                  # 进程元数据和日志
 
 | 表 | 用途 |
 | --- | --- |
-| `environments` | 一台服务器一行：连接信息（`name` / `host` / `username` / `password` / `vnc_port` / `purpose`）加上**当前**占用状态（`current_user_id` / `occupied_at` / `expected_return_at` / `occupancy_note`）；`deleted_at` 是软删，删除进回收站可恢复 |
+| `environments` | 一台服务器一行：连接信息（`name` / `host` / `username` / `password` / `vnc_port` / `vnc_password` / `purpose`）加上**当前**占用状态（`current_user_id` / `occupied_at` / `expected_return_at` / `occupancy_note`）；`deleted_at` 是软删，删除进回收站可恢复 |
 | `environment_usages` | 每一次占用一段：`occupied_at` / `released_at` / `note`，只追加不修改，是这台机器的占用流水 |
+| `environment_lch` | 挂在某台服务器下的下位机（LCH 等），**只有 `host` / `username` / `password`**。**故意没有 `current_user_id`** —— 占用单位是父服务器，所以这行不记占用，也不写 `environment_usages`。名称、端口、用途都留给人脑：实际要关心的只是「怎么连上去」 |
+
+`vnc_password` 单独一列：现实里 VNC 密码由 `vncpasswd` 单独设置（上限 8 位），与系统登录密码经常不是一回事。留空 = 不单独设。列是 `TEXT`，加它**不需要迁移**，`ensure_column` 补空串即可（不给历史数据编一个 VNC 密码出来）。
+
+删环境会**级联软删**下位机，但**不单独写回收站记录**——恢复父机时它们一起回来，否则会出现「主机不在、孤儿下位机还在」的数据。单删的下位机才进回收站，恢复前要确认父环境还在。
 
 `expected_return_at` 存的是**ISO 时刻**（不是日期）：写入时 `normalize_expected_return()` 把裸日期按「当天 23:59:59」展开，于是「是否已过期」是一次时间比较而非两条代码路径。列本身是 `TEXT`，换成时刻**不需要迁移**，存量日期行照常可读。
 

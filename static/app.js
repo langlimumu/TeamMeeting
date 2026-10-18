@@ -78,6 +78,8 @@ const state = {
   environmentSummary: null,
   environmentSecrets: {},
   editingEnvironmentId: null,
+  // 环境编辑弹窗里下位机的草稿：null = 收起；{ id } = 正在改这一条；id 为 null = 新增。
+  environmentLchDraft: null,
   // 卡片上点开的那台机器（存 id 字符串），null = 没展开详情。
   environmentDetailId: null,
   environmentUsages: [],
@@ -188,17 +190,6 @@ let pendingLinkDeleteId = null;
 let activePageRefreshId = 0;
 let authSyncInFlight = false;
 let lastAuthSyncAt = 0;
-
-const linkColumnWidthsStorageKey = "teamLoopLinkColumnWidths";
-const linkColumnMinWidth = 56;
-const linkColumnDefinitions = [
-  { key: "name", label: "名称" },
-  { key: "scope", label: "适用范围" },
-  { key: "url", label: "地址" },
-  { key: "clicks", label: "点击" },
-  { key: "manage", label: "操作" },
-];
-let activeLinkColumnDrag = null;
 
 function safeStorageGet(key, fallback) {
   try {
@@ -828,8 +819,34 @@ async function syncAuthState(force = false) {
   }
 }
 
+/* 按管理员配的顺序排导航（system_settings.nav_order，逗号分隔的模块 key）。
+   读的是 state.publicSettings 而不是 state.settings —— 后者只有管理员进
+   「系统管理」时才加载，而导航顺序**所有人**都要看到。
+   **没出现在列表里的模块按 pages 的默认顺序追加在最后** —— 这样以后新增模块
+   不会因为管理员还没配过就从导航里消失。 */
+function orderedPages() {
+  const configured = String(state.publicSettings?.nav_order || "")
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (!configured.length) return pages;
+  // 去重要保留**首次**出现的名次：Map 重复赋值会以后来的为准，那样 "a,b,a"
+  // 会把 a 排到 b 后面。后端本来就去了重，这里只是不让前端在脏值上表现奇怪。
+  const rank = new Map();
+  configured.forEach((key, index) => {
+    if (!rank.has(key)) rank.set(key, index);
+  });
+  return [...pages].sort((a, b) => {
+    const left = rank.has(a[0]) ? rank.get(a[0]) : Number.MAX_SAFE_INTEGER;
+    const right = rank.has(b[0]) ? rank.get(b[0]) : Number.MAX_SAFE_INTEGER;
+    // 同一档（都没配）保持 pages 原序；Array.sort 稳定，不写也不会乱，
+    // 但显式写出来省得读的人怀疑。
+    return left === right ? 0 : left - right;
+  });
+}
+
 function renderNav() {
-  $("#nav").innerHTML = pages
+  $("#nav").innerHTML = orderedPages()
     .filter(([id]) => canAccessPage(id))
     .map(([id, icon, title]) => `<button class="nav-item ${state.currentPage === id ? "active" : ""}" data-page="${id}"><span>${icon}</span>${title}</button>`)
     .join("");
@@ -2933,6 +2950,74 @@ async function markRemindersRead(keys = [], all = false) {
   renderReminders(Number(data.unread || 0));
 }
 
+/* 导航顺序编辑器：一列竖排的清单，每行「拖拽把手 + 序号 + 模块名」。
+   调序只靠拖拽（drag & drop），把手是行首的视觉提示 —— 用户明确不要上下箭头按钮。
+   刻意不做成网格 —— 模块数量不整除列数时网格会 ragged（长短行交错），
+   而顺序本身就是一条纵向的链，竖排才读得出来。
+   没配过的模块也列出来（用 pages 的顺序兜底），管理员要看到完整的一份才知道自己在排什么。 */
+const NAV_ORDER_GRIP_ICON = '<svg viewBox="0 0 10 16" width="10" height="16" fill="currentColor" aria-hidden="true" focusable="false"><circle cx="3" cy="3" r="1.5"></circle><circle cx="7" cy="3" r="1.5"></circle><circle cx="3" cy="8" r="1.5"></circle><circle cx="7" cy="8" r="1.5"></circle><circle cx="3" cy="13" r="1.5"></circle><circle cx="7" cy="13" r="1.5"></circle></svg>';
+
+function renderNavOrderItems(value) {
+  // 未传值时回退到当前状态（初始渲染由 renderSettingField 显式传入库里的值）。
+  const keys = navOrderKeysFrom(value === undefined ? state.publicSettings?.nav_order : value);
+  const titles = new Map(pages.map(([id, , title]) => [id, title]));
+  return keys.map((id, index) => `
+    <li class="nav-order-item" data-nav-order-key="${id}" draggable="true" title="拖动调整顺序">
+      <span class="nav-order-handle" aria-hidden="true">${NAV_ORDER_GRIP_ICON}</span>
+      <span class="nav-order-index" aria-hidden="true">${index + 1}</span>
+      <span class="nav-order-title">${escapeHtml(titles.get(id) || id)}</span>
+    </li>`).join("");
+}
+
+/* 拖拽落点计算：把 dragged 插到 target 前（after=false）或后（after=true）。
+   纯函数、返回新数组 —— 拖拽的「手感」在浏览器里，但「落到哪」必须是可断言的，
+   所以单独抽出来测（nav_order_logic_test.js）。
+   拖到自己头上或对方不在列表里时原样返回：宁可不动，也不能把模块弄丢。 */
+function reorderNavOrderKeys(keys, draggedKey, targetKey, after) {
+  if (draggedKey === targetKey || !keys.includes(draggedKey) || !keys.includes(targetKey)) return keys;
+  const next = keys.filter((key) => key !== draggedKey);
+  const at = next.indexOf(targetKey);
+  next.splice(after ? at + 1 : at, 0, draggedKey);
+  return next;
+}
+
+function navOrderKeysFrom(value) {
+  const configured = String(value || "").split(",").map((t) => t.trim()).filter(Boolean);
+  const known = pages.map(([id]) => id);
+  const rest = known.filter((id) => !configured.includes(id));
+  return [...configured.filter((id) => known.includes(id)), ...rest];
+}
+
+function navOrderKeys() {
+  return navOrderKeysFrom(state.publicSettings?.nav_order);
+}
+
+function applyNavOrder(keys) {
+  // ⚠️ 必须先写 state 再重绘：renderNavOrderItems 内部会读 state.publicSettings.nav_order，
+  //   顺序反了的话重绘用的是旧值 —— 松手瞬间列表弹回原顺序（「拖了没生效」的根因）。
+  const joined = keys.join(",");
+  state.publicSettings = { ...state.publicSettings, nav_order: joined };
+  const list = $("[data-nav-order-list]");
+  if (list) list.innerHTML = renderNavOrderItems(joined);
+  const input = $("[data-nav-order-value]");
+  if (input) input.value = joined;
+}
+
+/* 拖完即生效：本地立即重排（编辑器列表 + 左侧导航），同时把这一个字段自动存库。
+   顺序是「拖一下就成了」的低风险配置，不值得再让管理员去点一次「保存」；
+   PATCH /api/settings 支持部分更新（后端遍历传入的 key），只发 nav_order 不会碰其他设置。
+   失败只提示不回滚 —— 本地顺序留着，重拖一次即可覆盖。 */
+async function persistNavOrder(keys) {
+  applyNavOrder(keys);
+  renderNav();
+  try {
+    await api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: { nav_order: keys.join(",") } }) });
+    toast("导航顺序已保存");
+  } catch {
+    toast("导航顺序保存失败，请重试");
+  }
+}
+
 function renderSettingField(setting) {
   const key = escapeHtml(setting.key);
   const modeClass = setting.key === "sso_issuer_url" ? " sso-discovery-only" : ["sso_authorization_url", "sso_token_url", "sso_userinfo_url"].includes(setting.key) ? " sso-manual-only" : "";
@@ -2963,6 +3048,21 @@ function renderSettingField(setting) {
       <input value="访客 / 待分类（只读）" disabled>
       <small>${escapeHtml(setting.description || "")}</small>
     </label>`;
+  }
+  if (setting.key === "nav_order") {
+    // 排序编辑器：上下箭头调序 + 一个隐藏 input 存逗号分隔的结果。
+    // 隐藏 input 是必须的 —— 通用表单提交只认 <input name>，光用按钮排不出值。
+    return `<div class="setting-field nav-order-field" data-setting-key="${key}">
+      <div class="nav-order-head">
+        <span>${escapeHtml(setting.label)}</span>
+        <button class="nav-order-reset" type="button" data-nav-order-reset title="清空自定义顺序，按系统默认排列">恢复默认</button>
+      </div>
+      <input name="${key}" type="hidden" value="${escapeHtml(setting.value || "")}" data-nav-order-value>
+      <ol class="nav-order-list" data-nav-order-list>
+        ${renderNavOrderItems(setting.value)}
+      </ol>
+      <small>${escapeHtml(setting.description || "")}</small>
+    </div>`;
   }
   const inputType = setting.value_type === "number" ? "number" : setting.value_type === "password" ? "password" : "text";
   const placeholder = setting.value_type === "password" && setting.configured ? "已配置，留空保持不变" : "";
@@ -4815,153 +4915,6 @@ function linkTagTone(value, index = 0) {
   return `tone-${(hash % 6) + 1}`;
 }
 
-function linkColumnKeys(canManage) {
-  return linkColumnDefinitions
-    .filter((column) => column.key !== "manage" || canManage)
-    .map((column) => column.key);
-}
-
-function renderLinkColumnHeader(key) {
-  const definition = linkColumnDefinitions.find((column) => column.key === key) || { label: "" };
-  return `<th data-col-key="${key}">${definition.label}<span class="link-col-resizer" data-col-resize="${key}" role="separator" aria-orientation="vertical" tabindex="0" aria-label="调整${definition.label}列宽" title="拖动调整列宽，双击恢复默认"></span></th>`;
-}
-
-// 列宽偏好按“列语义”存 localStorage，用户自己拖过的宽度刷新后仍然生效。
-function readLinkColumnWidths() {
-  const raw = safeStorageGet(linkColumnWidthsStorageKey, "");
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    const widths = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      const width = Number(value);
-      if (Number.isFinite(width) && width >= linkColumnMinWidth) {
-        widths[key] = Math.round(width);
-      }
-    }
-    return Object.keys(widths).length ? widths : null;
-  } catch {
-    return null;
-  }
-}
-
-function persistLinkColumnWidths(widths) {
-  try {
-    safeStorageSet(linkColumnWidthsStorageKey, JSON.stringify(widths));
-  } catch {
-    // 列宽属于个人视图偏好，写入失败时静默退回默认列宽。
-  }
-}
-
-function linkTableColumnWidths(table) {
-  const widths = {};
-  table.querySelectorAll("thead th[data-col-key]").forEach((cell) => {
-    widths[cell.dataset.colKey] = Math.round(cell.getBoundingClientRect().width);
-  });
-  return widths;
-}
-
-function applyLinkColumnWidths(table, widths) {
-  const keys = Object.keys(widths);
-  if (!keys.length) return;
-  const total = keys.reduce((sum, key) => sum + widths[key], 0);
-  table.classList.add("has-custom-columns");
-  table.querySelectorAll("colgroup col").forEach((column) => {
-    const width = widths[column.dataset.colKey];
-    if (width) {
-      column.style.width = `${width}px`;
-    } else {
-      column.style.removeProperty("width");
-    }
-  });
-  // 有余量时仍铺满容器，宽度超出容器时按用户设定精确滚动。
-  table.style.width = `max(100%, ${total}px)`;
-  table.style.minWidth = "0";
-}
-
-function restoreLinkColumnWidths(table) {
-  const saved = readLinkColumnWidths();
-  if (!saved) return;
-  const present = new Set([...table.querySelectorAll("colgroup col")].map((column) => column.dataset.colKey));
-  const usable = {};
-  for (const [key, width] of Object.entries(saved)) {
-    if (present.has(key)) usable[key] = width;
-  }
-  if (Object.keys(usable).length) applyLinkColumnWidths(table, usable);
-}
-
-function resetLinkColumnWidths() {
-  safeStorageSet(linkColumnWidthsStorageKey, "");
-  const table = $("#linkList table");
-  if (table) {
-    table.classList.remove("has-custom-columns");
-    table.style.removeProperty("width");
-    table.style.removeProperty("min-width");
-    table.querySelectorAll("colgroup col").forEach((column) => column.style.removeProperty("width"));
-  }
-  toast("已恢复默认列宽");
-}
-
-function beginLinkColumnResize(event, resizer) {
-  const table = resizer.closest("table");
-  const key = resizer.dataset.colResize;
-  if (!table || !key) return;
-  event.preventDefault();
-  activeLinkColumnDrag = {
-    table,
-    key,
-    resizer,
-    startX: event.clientX,
-    baseWidths: linkTableColumnWidths(table),
-    widths: null,
-  };
-  resizer.classList.add("is-active");
-  document.body.classList.add("link-column-resizing");
-  window.addEventListener("pointermove", handleLinkColumnResizeMove);
-  window.addEventListener("pointerup", finishLinkColumnResize);
-  window.addEventListener("pointercancel", finishLinkColumnResize);
-}
-
-function handleLinkColumnResizeMove(event) {
-  const drag = activeLinkColumnDrag;
-  if (!drag) return;
-  const delta = event.clientX - drag.startX;
-  if (!delta) return;
-  const base = drag.baseWidths[drag.key];
-  if (!Number.isFinite(base)) return;
-  drag.widths = {
-    ...drag.baseWidths,
-    [drag.key]: Math.max(linkColumnMinWidth, Math.round(base + delta)),
-  };
-  applyLinkColumnWidths(drag.table, drag.widths);
-}
-
-function finishLinkColumnResize() {
-  const drag = activeLinkColumnDrag;
-  if (!drag) return;
-  activeLinkColumnDrag = null;
-  drag.resizer.classList.remove("is-active");
-  document.body.classList.remove("link-column-resizing");
-  window.removeEventListener("pointermove", handleLinkColumnResizeMove);
-  window.removeEventListener("pointerup", finishLinkColumnResize);
-  window.removeEventListener("pointercancel", finishLinkColumnResize);
-  if (drag.widths) persistLinkColumnWidths(drag.widths);
-}
-
-function nudgeLinkColumnWidth(resizer, step) {
-  const table = resizer.closest("table");
-  const key = resizer.dataset.colResize;
-  if (!table || !key) return;
-  const current = linkTableColumnWidths(table);
-  if (!Number.isFinite(current[key])) return;
-  const widths = {
-    ...current,
-    [key]: Math.max(linkColumnMinWidth, Math.round(current[key] + step)),
-  };
-  applyLinkColumnWidths(table, widths);
-  persistLinkColumnWidths(widths);
-}
 
 function renderLinks() {
   const category = $("#linkCategoryFilter")?.value || "";
@@ -4987,70 +4940,96 @@ function renderLinks() {
   const canEdit = canOperate("links", "edit");
   const canDelete = canOperate("links", "delete");
   const canManage = canEdit || canDelete;
-  const columnKeys = linkColumnKeys(canManage);
-  $("#linkList").innerHTML = filtered.length ? `
-    <table class="link-list-table ${canManage ? "has-manage" : ""}">
-      <colgroup>${columnKeys.map((key) => `<col data-col-key="${key}">`).join("")}</colgroup>
-      <thead><tr>${columnKeys.map(renderLinkColumnHeader).join("")}</tr></thead>
-      <tbody>
-        ${filtered.map((link) => {
-          const scope = [...(link.machine_scope || []), ...(link.process_tags || [])];
-          const scopeText = scope.join(", ") || "-";
-          const addressText = [link.url, link.description].filter(Boolean).join(" · ");
-          return `
-          <tr class="${Number(link.invalid) === 1 ? "link-invalid" : ""}">
-            <td>
-              <div class="link-single-line link-name-line" title="${escapeHtml(link.title)}">
-                <strong>${escapeHtml(link.title)}</strong>
-                <span class="tag link-tag ${linkTagTone(link.category, 0)}">${escapeHtml(link.category || "通用")}</span>
-                ${Number(link.pinned) === 1 ? '<span class="pill link-pinned-pill">置顶</span>' : ""}
-                ${Number(link.invalid) === 1 ? '<span class="pill warn">失效</span>' : ""}
-              </div>
-            </td>
-            <td>
-              <div class="link-scope-tags" title="${escapeHtml(scopeText)}">
-                ${scope.length ? scope.map((item, index) => `<span class="tag link-tag ${linkTagTone(item, index)}">${escapeHtml(item)}</span>`).join("") : '<span class="link-empty">-</span>'}
-              </div>
-            </td>
-            <td>
-              <div class="link-single-line" title="${escapeHtml(addressText)}">
-                ${Number(link.invalid) === 1
-                  ? `<span class="link-url disabled">${escapeHtml(link.url)}</span>`
-                  : `<a class="link-url" href="/api/links/${link.id}/open" target="_blank" rel="noreferrer">${escapeHtml(link.url)}</a>`}
-                ${link.description ? `<span class="link-description"> · ${escapeHtml(link.description)}</span>` : ""}
-              </div>
-            </td>
-            <td><span title="${escapeHtml(link.last_clicked_at || "")}">${Number(link.click_count || 0)} 次</span></td>
-            ${canManage ? `
-              <td>
-                <div class="link-action-menu-wrap">
-                  <button class="link-action-menu-toggle" type="button" data-link-menu-toggle data-link-id="${link.id}" aria-label="更多操作" title="更多操作" aria-expanded="false">⋯</button>
-                  <div class="link-action-menu hidden" data-link-menu="${link.id}">
-                    ${canEdit ? `<button class="link-edit-btn" type="button" data-link-id="${link.id}">编辑链接</button>` : ""}
-                    ${canDelete ? `<button class="link-delete-btn danger-text" type="button" data-link-id="${link.id}">删除链接</button>` : ""}
-                  </div>
-                </div>
-                ${isAdminView() ? `<form class="link-quality-form" data-link-id="${link.id}">
-                  <select name="pinned">
-                    <option value="0" ${Number(link.pinned) === 1 ? "" : "selected"}>不置顶</option>
-                    <option value="1" ${Number(link.pinned) === 1 ? "selected" : ""}>置顶</option>
-                  </select>
-                  <select name="invalid">
-                    <option value="0" ${Number(link.invalid) === 1 ? "" : "selected"}>可用</option>
-                    <option value="1" ${Number(link.invalid) === 1 ? "selected" : ""}>失效</option>
-                  </select>
-                  <input name="machine_scope" value="${escapeHtml((link.machine_scope || []).join(", "))}" placeholder="适用机台">
-                  <input name="process_tags" value="${escapeHtml((link.process_tags || []).join(", "))}" placeholder="流程标签">
-                  <input name="quality_note" value="${escapeHtml(link.quality_note || "")}" placeholder="质量备注">
-                  <button>保存</button>
-                </form>` : ""}
-              </td>` : ""}
-          </tr>`;
-        }).join("")}
-      </tbody>
-    </table>` : "<p>没有匹配的链接</p>";
-  const linkTable = $("#linkList table");
-  if (linkTable) restoreLinkColumnWidths(linkTable);
+  $("#linkList").innerHTML = filtered.length
+    ? renderLinkWall(filtered, { canEdit, canDelete, canManage })
+    : "<p>没有匹配的链接</p>";
+}
+
+/* 常用链接是**按分类分块的 chip 墙**：表格适合比较，但「找某个系统的入口」
+   是定位任务，按分类一堆一堆地看更快；类内一条链接一个小 chip（只有名字），
+   点名字直接跳转。
+   分类块用 linkCategories 的顺序（管理员排过序），没登记的分类排在后面，
+   没填分类的链接归到「通用」块。 */
+function renderLinkWall(links, { canEdit, canDelete, canManage }) {
+  const groups = new Map();
+  links.forEach((link) => {
+    const name = String(link.category || "").trim() || "通用";
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(link);
+  });
+  const knownOrder = (state.linkCategories || []).map((item) => item.name);
+  const names = [...groups.keys()].sort((a, b) => {
+    const left = knownOrder.indexOf(a);
+    const right = knownOrder.indexOf(b);
+    // 未登记的分类（含「通用」）沉到最后，彼此之间保持首次出现的顺序。
+    const leftRank = left === -1 ? Number.MAX_SAFE_INTEGER : left;
+    const rightRank = right === -1 ? Number.MAX_SAFE_INTEGER : right;
+    return leftRank === rightRank ? 0 : leftRank - rightRank;
+  });
+  return `<div class="link-wall">${names.map((name, blockIndex) => {
+    const items = groups.get(name);
+    return `
+      <section class="link-block tone-${(blockIndex % 5) + 1}" data-link-block="${escapeHtml(name)}">
+        <h3 class="link-block-title">
+          ${escapeHtml(name)}
+          <span class="link-block-count">${items.length}</span>
+        </h3>
+        <div class="link-block-grid">
+          ${items.map((link) => renderLinkTile(link, { canEdit, canDelete, canManage })).join("")}
+        </div>
+      </section>`;
+  }).join("")}</div>`;
+}
+
+/* 常用链接是**按分类分块的紧凑 chip 墙**（用户草图）：一个链接就是一个小牌子，
+   只有名字，点名字直接跳转；⋯ 菜单跟在牌子右边。
+   URL、描述、点击次数不放台面上——一串长网址会把视线全吸走，而大家是来
+   「找入口」的不是来「读网址」的。这些信息收进 title 提示，搜索仍按全字段
+   匹配（renderLinks 那边没动），信息一条不丢。 */
+function renderLinkTile(link, { canEdit, canDelete, canManage }) {
+  const invalid = Number(link.invalid) === 1;
+  const pinned = Number(link.pinned) === 1;
+  const tip = [
+    link.url || "",
+    link.description || "",
+    link.quality_note || "",
+    `${Number(link.click_count || 0)} 次`,
+  ].filter(Boolean).join(" · ");
+  const titleAttr = tip ? ` title="${escapeHtml(tip)}"` : "";
+  const flags = `${pinned ? '<span class="link-chip-flag">置顶</span>' : ""}${invalid ? '<span class="link-chip-flag warn">失效</span>' : ""}`;
+  // 失效链接不给跳转入口 —— 它还在那儿占位，但不能点，避免点到一半才发现打不开。
+  const chip = invalid
+    ? `<span class="link-chip disabled"${titleAttr}><span class="link-chip-title">${escapeHtml(link.title)}</span>${flags}</span>`
+    : `<a class="link-chip" href="/api/links/${link.id}/open" target="_blank" rel="noreferrer"${titleAttr}><span class="link-chip-title">${escapeHtml(link.title)}</span>${flags}</a>`;
+  // chip-item 本身就是那个「框」：链接文案和 ⋯ 钮并在同一个框里（用户要求）。
+  // is-invalid = 失效链接（虚线框）；is-bare = 没有 ⋯ 钮（右边距补回来）。
+  return `
+    <span class="link-chip-item${invalid ? " is-invalid" : ""}${canManage ? "" : " is-bare"}" data-link-id="${link.id}">
+      ${chip}
+      ${canManage ? `
+        <span class="link-action-menu-wrap">
+          <button class="link-action-menu-toggle" type="button" data-link-menu-toggle data-link-id="${link.id}" aria-label="更多操作" title="更多操作" aria-expanded="false">⋯</button>
+          <div class="link-action-menu hidden${isAdminView() ? " has-quality" : ""}" data-link-menu="${link.id}">
+            ${canEdit ? `<button class="link-edit-btn" type="button" data-link-id="${link.id}">编辑链接</button>` : ""}
+            ${canDelete ? `<button class="link-delete-btn danger-text" type="button" data-link-id="${link.id}">删除链接</button>` : ""}
+            ${isAdminView() ? `<div class="link-menu-divider"></div>
+            <form class="link-quality-form" data-link-id="${link.id}">
+              <select name="pinned">
+                <option value="0" ${pinned ? "" : "selected"}>不置顶</option>
+                <option value="1" ${pinned ? "selected" : ""}>置顶</option>
+              </select>
+              <select name="invalid">
+                <option value="0" ${invalid ? "" : "selected"}>可用</option>
+                <option value="1" ${invalid ? "selected" : ""}>失效</option>
+              </select>
+              <input name="machine_scope" value="${escapeHtml((link.machine_scope || []).join(", "))}" placeholder="适用机台">
+              <input name="process_tags" value="${escapeHtml((link.process_tags || []).join(", "))}" placeholder="流程标签">
+              <input name="quality_note" value="${escapeHtml(link.quality_note || "")}" placeholder="质量备注">
+              <button>保存</button>
+            </form>` : ""}
+          </div>
+        </span>` : ""}
+    </span>`;
 }
 
 function renderShiftLine(shift) {
@@ -5430,27 +5409,78 @@ function environmentHolderLine(environment) {
   return parts.join("");
 }
 
+/* 复制图标用内联 SVG 而不是字符：⧉(U+29C9) 渲染出来是「方框套方框」，
+   小尺寸下被读成一团莫名其妙的框（用户原话：值后面一个大框，中间才是图标）。
+   SVG 画两个叠放的圆角矩形——主流站点的 copy 图标，stroke 走 currentColor，
+   颜色跟着按钮的 --muted/--ink 变，任何主题都不用单独配色。 */
+const ENV_COPY_ICON = '<svg class="env-copy-icon" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+
+/* 一行「标签 + 值 (+ 复制按钮)」。复制按钮是这批改动里最容易被漏掉的一环：
+   IP、账号、密码、VNC 端口都要能一键复制，否则大家还是得用鼠标框选，
+   而密码框打码后根本没法框选。 */
+function environmentFieldHtml(label, value, options = {}) {
+  const { copyValue = value, mask = false, revealId = "", shown = false } = options;
+  const display = mask ? (value ? "••••••" : "未设置") : value;
+  const valueNode = mask
+    ? `<span class="env-field-value env-secret is-masked" data-env-reveal="${revealId}" title="点击显示密码" role="button" tabindex="0" aria-label="${escapeHtml(label)}">${display}</span>`
+    : `<span class="env-field-value">${escapeHtml(display)}</span>`;
+  // 密码未展开时不给复制按钮：不然「复制」会悄悄复制出一串打码字符。
+  const canCopy = copyValue && (!mask || shown);
+  const copyNode = canCopy
+    ? `<button class="env-copy-btn" type="button" data-env-copy="${escapeHtml(String(copyValue))}" title="复制${escapeHtml(label)}" aria-label="复制${escapeHtml(label)}">${ENV_COPY_ICON}</button>`
+    : "";
+  // 值和复制按钮必须包在同一个 .env-field-line（flex 居中）里，才是「值后紧跟图标」
+  // 的同一排；按钮靠 align-self 修不对 —— 问题出在容器的对齐方式上。
+  return `<span class="env-field"><span class="env-field-label">${escapeHtml(label)}</span><span class="env-field-line">${valueNode}${copyNode}</span></span>`;
+}
+
+/* 下位机（LCH）块：折叠显示，有几台就写几台。它不能被单独占用，所以这一块里
+   没有任何占用相关的入口 —— 父机的占用状态就是下面所有下位机的占用状态。
+   **只读**：新增/编辑/删除都在环境编辑弹窗里（跟改环境信息同一个地方），
+   卡片这一块只负责「打开就能看见、看见就能复制」。 */
+function environmentLchHtml(environment) {
+  const items = environment.lch || [];
+  const rows = items.map((item) => `
+    <div class="env-lch-item">
+      <div class="env-lch-fields">
+        ${environmentFieldHtml("IP", item.host)}
+        ${environmentFieldHtml("账号", item.username)}
+        ${environmentFieldHtml("密码", item.password, { mask: true, revealId: `lch-${item.id}` })}
+      </div>
+    </div>`).join("");
+  const bodyId = `env-lch-body-${environment.id}`;
+  return `
+    <div class="env-lch">
+      <button class="env-lch-toggle" type="button" data-env-lch-toggle="${environment.id}" aria-expanded="false" aria-controls="${bodyId}">
+        <span class="env-lch-caret" aria-hidden="true">▸</span>
+        <span>下位机（${items.length}）</span>
+      </button>
+      <div class="env-lch-body hidden" id="${bodyId}">${
+        items.length ? rows : '<p class="env-lch-empty">这台服务器还没有挂下位机，管理员可在「编辑」里添加。</p>'
+      }</div>
+    </div>`;
+}
+
 function environmentCardHtml(environment) {
   const statusClass = environment.occupied ? (environment.is_mine ? "is-mine" : "is-busy") : "is-free";
   const overdueClass = environmentIsOverdue(environment) ? " is-overdue" : "";
-  const vnc = environment.vnc_port
-    ? `<span class="env-field"><span class="env-field-label">VNC 端口</span><span class="env-field-value">${escapeHtml(environment.vnc_port)}</span></span>`
-    : "";
   return `
     <article class="env-card ${statusClass}${overdueClass}" data-environment-id="${environment.id}">
       <header class="env-card-head">
         <div class="env-card-title">
-          <h3>${escapeHtml(environment.name)}</h3>
-          <p class="env-host">${escapeHtml(environment.host)}</p>
+          <h3>${escapeHtml(environment.name)}<button class="env-copy-btn" type="button" data-env-copy="${escapeHtml(environment.name)}" title="复制名称" aria-label="复制名称">${ENV_COPY_ICON}</button></h3>
+          <p class="env-host">${escapeHtml(environment.host)}<button class="env-copy-btn" type="button" data-env-copy="${escapeHtml(environment.host)}" title="复制 IP" aria-label="复制 IP">${ENV_COPY_ICON}</button></p>
         </div>
         <span class="env-badge">${environment.occupied ? "使用中" : "空闲"}</span>
       </header>
       ${environment.purpose ? `<p class="env-purpose">${escapeHtml(environment.purpose)}</p>` : ""}
       <div class="env-fields">
-        <span class="env-field"><span class="env-field-label">账号</span><span class="env-field-value">${escapeHtml(environment.username)}</span></span>
-        <span class="env-field"><span class="env-field-label">密码</span><span class="env-field-value env-secret is-masked" data-env-reveal="${environment.id}" title="点击显示密码" role="button" tabindex="0">${environment.password ? "••••••" : "未设置"}</span></span>
-        ${vnc}
+        ${environmentFieldHtml("账号", environment.username)}
+        ${environmentFieldHtml("密码", environment.password, { mask: true, revealId: `env-${environment.id}` })}
+        ${environment.vnc_port ? environmentFieldHtml("VNC 端口", environment.vnc_port) : ""}
+        ${environment.vnc_password ? environmentFieldHtml("VNC 密码", environment.vnc_password, { mask: true, revealId: `vnc-${environment.id}` }) : ""}
       </div>
+        ${environmentLchHtml(environment)}
       <div class="env-holder">${environmentHolderLine(environment)}</div>
       ${environment.occupancy_note ? `<p class="env-note">${escapeHtml(environment.occupancy_note)}</p>` : ""}
       <footer class="env-card-actions">
@@ -5572,21 +5602,76 @@ function renderEnvironmentCards() {
 /* 密码默认打码，点一下才展开。展开状态只活在这一张卡片上：重绘（占用、筛选、刷新）
    之后一律回到打码，所以「点开忘关」不会把明文长期留在屏幕上。
    明文从 state.environmentSecrets 取，而不是从 DOM 属性读 —— 打进 HTML 的那一刻它就
-   已经进了 DOM，投屏、扩展、DevTools 都看得到。 */
+   已经进了 DOM，投屏、扩展、DevTools 都看得到。
+   reveal id 形如 `env-12`（登录密码）、`vnc-12`（VNC 密码）、`lch-34`（下位机密码），
+   统一由 state.environmentSecrets 以同一个字符串做键。 */
 function toggleEnvironmentSecret(node) {
-  const environmentId = node.dataset.envReveal;
+  const secretKey = node.dataset.envReveal;
   if (node.dataset.envShown === "1") {
-    node.textContent = (state.environmentSecrets[environmentId] || "") ? "••••••" : "未设置";
+    node.textContent = (state.environmentSecrets[secretKey] || "") ? "••••••" : "未设置";
     node.classList.add("is-masked");
     node.title = "点击显示密码";
     delete node.dataset.envShown;
+    syncEnvironmentCopyButtons();
     return;
   }
-  const secret = state.environmentSecrets[environmentId] || "";
+  const secret = state.environmentSecrets[secretKey] || "";
   node.textContent = secret || "未设置";
   node.classList.remove("is-masked");
   node.title = "点击隐藏密码";
   node.dataset.envShown = "1";
+  syncEnvironmentCopyButtons();
+}
+
+/* 密码没展开时不画复制按钮 —— 否则「复制」会复制出一串打码字符，看着能用、粘出来是错的。
+   展开的瞬间把这个按钮补上，收回时又拿掉，所以这个函数两个方向都要处理。 */
+function syncEnvironmentCopyButtons() {
+  $$(".env-secret").forEach((secretNode) => {
+    const field = secretNode.closest(".env-field");
+    if (!field) return;
+    const existing = field.querySelector(".env-copy-btn");
+    const label = field.querySelector(".env-field-label")?.textContent || "密码";
+    const secret = state.environmentSecrets[secretNode.dataset.envReveal] || "";
+    if (secretNode.dataset.envShown === "1") {
+      if (existing || !secret) return;
+      // 按钮要插进「值 + 图标」那一行（.env-field-line），插到 field 末尾会掉到下一行去。
+      const line = field.querySelector(".env-field-line") || field;
+      line.insertAdjacentHTML("beforeend",
+        `<button class="env-copy-btn" type="button" data-env-copy="${escapeHtml(secret)}" title="复制${escapeHtml(label)}" aria-label="复制${escapeHtml(label)}">${ENV_COPY_ICON}</button>`);
+      return;
+    }
+    existing?.remove();
+  });
+}
+
+/* 复制用 Clipboard API；非安全上下文（内网 http 访问）navigator.clipboard 不存在，
+   退回 execCommand。它必须返回 Promise 给调用方回显用，所以两条路都包成 async。 */
+async function copyEnvironmentValue(text) {
+  const value = String(text || "");
+  if (!value) return false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch (error) {
+      // 权限被拒时继续走降级，不要把失败吞掉当成功。
+    }
+  }
+  const scratch = document.createElement("textarea");
+  scratch.value = value;
+  scratch.setAttribute("readonly", "");
+  scratch.style.position = "fixed";
+  scratch.style.opacity = "0";
+  document.body.appendChild(scratch);
+  scratch.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch (error) {
+    copied = false;
+  }
+  document.body.removeChild(scratch);
+  return copied;
 }
 
 /* Esc 一键收回所有已展开的密码（不是逐个 toggle —— 有的正显示有的没显示时，
@@ -5598,16 +5683,24 @@ function closeEnvironmentSecret() {
     node.title = "点击显示密码";
     delete node.dataset.envShown;
   });
+  syncEnvironmentCopyButtons();
 }
 
 async function loadEnvironments() {
   const payload = await api("/api/environments");
   state.environments = payload.environments || [];
   state.environmentSummary = payload.summary || null;
-  // 密码单独存一份，不混进渲染用的数据里；卡片模板只拿 id 去换。
-  state.environmentSecrets = Object.fromEntries(
-    state.environments.map((item) => [String(item.id), item.password || ""]),
-  );
+  // 所有密码摊平成一张表，键就是 data-env-reveal 的值：`env-12` / `vnc-12` / `lch-34`。
+  // 明文不进 DOM，卡片模板只拿键去换 —— 打进 HTML 的那一刻它就已经能被投屏和扩展看到了。
+  const secrets = {};
+  state.environments.forEach((item) => {
+    secrets[`env-${item.id}`] = item.password || "";
+    secrets[`vnc-${item.id}`] = item.vnc_password || "";
+    (item.lch || []).forEach((child) => {
+      secrets[`lch-${child.id}`] = child.password || "";
+    });
+  });
+  state.environmentSecrets = secrets;
   renderEnvironmentCards();
 }
 
@@ -5645,6 +5738,111 @@ async function releaseEnvironment(environmentId) {
   toast(payload.message || "环境已释放");
 }
 
+/* 下位机（LCH）管理区：**长在环境编辑弹窗里**，跟改环境信息在同一个地方 ——
+   单独一个弹窗、卡片上再来一个「＋ 下位机」，三处入口太散。
+   这里只做「当前这台环境」的下位机：列表 + 内联草稿表单，保存是即时的
+   （每条一个请求），所以不需要「一起提交」的暂存区。
+   拆成 environmentLchSectionHtml()（纯字符串，可单测）+ 这个渲染器。 */
+function environmentLchSectionHtml(environment) {
+  const canManage = canEditEnvironment();
+  const items = environment.lch || [];
+  const draft = state.environmentLchDraft;
+  const draftItem = draft?.id
+    ? items.find((item) => String(item.id) === String(draft.id)) || null
+    : null;
+  return `
+    <div class="env-lch-manage-head">
+      <h3>下位机（${items.length}）</h3>
+      ${canManage && !draft ? `<button class="secondary" type="button" data-env-lch-draft-add>＋ 添加下位机</button>` : ""}
+    </div>
+    ${items.length ? `<ul class="env-lch-manage-list">
+      ${items.map((item) => `
+        <li class="env-lch-manage-item" data-env-lch-row="${item.id}">
+          <div class="env-lch-manage-fields">
+            ${environmentFieldHtml("IP", item.host)}
+            ${environmentFieldHtml("账号", item.username)}
+            ${environmentFieldHtml("密码", item.password, { mask: true, revealId: `lch-${item.id}` })}
+          </div>
+          ${canManage ? `<div class="env-lch-manage-actions">
+            <button class="secondary" type="button" data-env-lch-draft-edit="${item.id}">编辑</button>
+            ${canDeleteEnvironment() ? `<button class="secondary danger-text" type="button" data-env-lch-manage-delete="${item.id}">删除</button>` : ""}
+          </div>` : ""}
+        </li>`).join("")}
+    </ul>` : '<p class="env-lch-manage-empty">这台服务器还没有挂下位机。占服务器时，它下面的下位机一并算占用。</p>'}
+    ${draft ? `
+      <form class="env-lch-draft" id="environmentLchDraftForm">
+        <input type="hidden" name="lch_id" value="${draft.id || ""}" />
+        <label>IP<input name="host" placeholder="如：10.0.0.31" maxlength="120" required /></label>
+        <label>账号<input name="username" placeholder="如：lch_a" maxlength="60" required /></label>
+        <label>密码<input name="password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" placeholder="${draftItem ? "留空表示不修改当前密码" : "密码（选填）"}" /></label>
+        <div class="env-lch-draft-actions">
+          <button class="secondary" type="button" data-env-lch-draft-cancel>取消</button>
+          <button type="submit">${draftItem ? "保存修改" : "添加"}</button>
+        </div>
+      </form>` : ""}`;
+}
+
+function renderEnvironmentLchSection() {
+  const box = $("#environmentLchSection");
+  if (!box) return;
+  const environmentId = state.editingEnvironmentId;
+  const environment = (state.environments || []).find((item) => String(item.id) === String(environmentId));
+  if (!environment) {
+    // 新建环境还没有 id，挂不了下位机 —— 但要把这件事说清楚，别让人以为漏了功能。
+    box.classList.remove("hidden");
+    box.innerHTML = `
+      <div class="env-lch-manage-head"><h3>下位机</h3></div>
+      <p class="env-lch-manage-empty">环境创建保存后，可以在这里添加挂在它下面的下位机。</p>`;
+    return;
+  }
+  box.classList.remove("hidden");
+  box.innerHTML = environmentLchSectionHtml(environment);
+  // 草稿表单回填（新建环境还没有 id 时不会走到这里，上面的 !environment 已挡掉）。
+  const form = $("#environmentLchDraftForm");
+  if (form && state.environmentLchDraft?.id) {
+    const draftItem = (environment.lch || []).find((item) => String(item.id) === String(state.environmentLchDraft.id));
+    if (draftItem) {
+      form.elements.host.value = draftItem.host || "";
+      form.elements.username.value = draftItem.username || "";
+    }
+  }
+  form?.elements.host?.focus();
+}
+
+function openEnvironmentLchDraft(lchId = null) {
+  state.environmentLchDraft = { id: lchId ? Number(lchId) : null };
+  renderEnvironmentLchSection();
+}
+
+function closeEnvironmentLchDraft() {
+  state.environmentLchDraft = null;
+  renderEnvironmentLchSection();
+}
+
+async function submitEnvironmentLchDraft(payload) {
+  const environmentId = state.editingEnvironmentId;
+  const lchId = state.environmentLchDraft?.id;
+  if (lchId) {
+    await api(`/api/environment-lch/${lchId}`, { method: "PATCH", body: JSON.stringify(payload) });
+  } else {
+    await api(`/api/environments/${environmentId}/lch`, { method: "POST", body: JSON.stringify(payload) });
+  }
+  // 保存完就收起草稿：留着会让人以为还能再改一次（而且编辑保存后表单还回填着
+  // 旧值，更容易误判）。要连续加多台就再点一次「＋ 添加下位机」。
+  state.environmentLchDraft = null;
+  await loadEnvironments();
+  renderEnvironmentLchSection();
+  toast(lchId ? "下位机已更新" : "下位机已新增");
+}
+
+async function deleteEnvironmentLch(lchId) {
+  if (!window.confirm("删除这台下位机？删除后可从回收站恢复。")) return;
+  const payload = await api(`/api/environment-lch/${lchId}`, { method: "DELETE" });
+  await loadEnvironments();
+  renderEnvironmentLchSection();
+  toast(payload.message || "下位机已删除");
+}
+
 function openEnvironmentEditor(environment = null) {
   const form = $("#environmentForm");
   if (!form) return;
@@ -5661,7 +5859,13 @@ function openEnvironmentEditor(environment = null) {
     ? "留空表示不修改当前密码"
     : "登录密码（选填）";
   form.elements.vnc_port.value = environment?.vnc_port || "";
+  // VNC 密码同样不回填：它与登录密码是两套东西，但「会进 DOM」的风险完全一样。
+  form.elements.vnc_password.value = "";
+  form.elements.vnc_password.placeholder = environment?.vnc_password
+    ? "已设置，留空表示不修改"
+    : "VNC 密码（选填，与登录密码无关时填这里）";
   form.elements.purpose.value = environment?.purpose || "";
+  state.environmentLchDraft = null;
   $("#environmentModalTitle").textContent = environment ? `编辑「${environment.name}」` : "新增环境";
   $("#environmentSubmitBtn").textContent = environment ? "保存修改" : "创建环境";
   const modal = $("#environmentModal");
@@ -5669,6 +5873,7 @@ function openEnvironmentEditor(environment = null) {
     modal.classList.remove("hidden");
     modal.setAttribute("aria-hidden", "false");
   }
+  renderEnvironmentLchSection();
   form.elements.name.focus();
 }
 
@@ -5678,6 +5883,7 @@ function closeEnvironmentEditor() {
   modal.classList.add("hidden");
   modal.setAttribute("aria-hidden", "true");
   state.editingEnvironmentId = null;
+  state.environmentLchDraft = null;
 }
 
 async function submitEnvironmentForm(payload) {
@@ -7363,6 +7569,25 @@ function toggleLinkActionMenu(button) {
   const menu = $(`[data-link-menu="${linkId}"]`);
   const shouldOpen = menu?.classList.contains("hidden");
   closeLinkActionMenus(shouldOpen ? linkId : null);
+  // 菜单带「质量设置」表单时有 ~200px 高，最后几行点开必然冲出屏幕底部。
+  // 这里按剩余空间决定向上还是向下展开（CSS 里 .opens-up 把 top 换成 bottom）。
+  if (shouldOpen && menu) {
+    const wrap = button.closest(".link-action-menu-wrap");
+    const room = window.innerHeight - wrap.getBoundingClientRect().bottom;
+    menu.classList.toggle("opens-up", room < 220);
+    // 水平方向：菜单默认右对齐、向左展开。第一个 chip 可能就贴着内容区左缘，
+    // 菜单往左伸会钻到侧栏底下（侧栏 z-index 更高，看着就是「被遮挡」）——
+    // 所以左边界按**内容区**（#linkList 左缘）算，不是视口：越界就翻成
+    // 左对齐、向右展开。翻转后若又冲出视口右缘（极窄屏），回退默认对齐。
+    menu.classList.remove("opens-left");
+    const containerLeft = $("#linkList")?.getBoundingClientRect().left ?? 0;
+    if (menu.getBoundingClientRect().left < containerLeft) {
+      menu.classList.add("opens-left");
+      if (menu.getBoundingClientRect().right > window.innerWidth - 8) {
+        menu.classList.remove("opens-left");
+      }
+    }
+  }
 }
 
 function closeLinkDeleteModal() {
@@ -8323,8 +8548,9 @@ function bindEvents() {
       vnc_port: data.vnc_port || "",
     };
     // 留空 = 不改密码（见 openEnvironmentEditor 的注释），所以空值根本不发出去，
-    // 否则后端会把旧密码清成空串。
+    // 否则后端会把旧密码清成空串。VNC 密码同一条规则。
     if (data.password) payload.password = data.password;
+    if (data.vnc_password) payload.vnc_password = data.vnc_password;
     submitEnvironmentForm(payload).catch((error) => toast(error.message));
   });
   $$("[data-environment-occupy-close]").forEach((button) => button.addEventListener("click", closeEnvironmentOccupyModal));
@@ -8439,7 +8665,118 @@ function bindEvents() {
       if (submit) submit.disabled = false;
     }
   });
-  bindForm("#settingsForm", (data) => api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) }));
+  bindForm("#settingsForm", async (data) => {
+    const result = await api("/api/settings", { method: "PATCH", body: JSON.stringify({ settings: data }) });
+    // 导航顺序改了要立刻重画左侧栏，否则管理员保存完还得刷新页面才看得出变化。
+    if (data.nav_order !== undefined) {
+      state.publicSettings = { ...state.publicSettings, nav_order: result.settings?.nav_order ?? data.nav_order };
+      renderNav();
+    }
+    return result;
+  });
+  // 「恢复默认」不是清空（清空会被读成「没配过」，效果一样但看不出发生了什么），
+  // 而是把 pages 的默认顺序显式写进去 —— 管理员能亲眼看到回到了什么样。
+  // （调序只靠拖拽，行首把手是提示；这里不再有上下箭头按钮。）
+  $("#settingsForm")?.addEventListener("click", (event) => {
+    const reset = event.target.closest("[data-nav-order-reset]");
+    if (reset) {
+      event.preventDefault();
+      persistNavOrder(pages.map(([id]) => id));
+    }
+  });
+  // 拖拽调序（**实时重排**，SortableJS 同款交互，原生实现不加依赖）：
+  // 指针扫过某行的上/下半截，其余行立刻「挤开」让位（FLIP 平移动画过渡），
+  // 序号跟着刷新；列表滚动到边缘时自动续滚，保证下面的行也拖得到。
+  // ⚠️ 列表元素**每次事件里现查**：它由 renderSettings 动态渲染，初始化时还不存在，
+  //   绑定时抓一次引用拿到的是 null —— 之前拖拽完全空转就是栽在这里。
+  // ⚠️ 中途不能走 applyNavOrder 重画 innerHTML：那会把正在拖的源节点整个换掉，
+  //   Chrome 里源节点被移出 DOM 拖拽就直接断了。所以中途只**移动**现有节点
+  //   （appendChild 同一节点是搬家不是重建，拖拽继续），松手后才 applyNavOrder 收敛。
+  let navOrderDragKey = null;
+  const navOrderListOf = () => $("[data-nav-order-list]");
+  const navOrderDomKeys = () => [...navOrderListOf()?.children || []].map((li) => li.dataset.navOrderKey);
+  const navFlipAnims = new WeakMap();
+  const moveNavOrderDom = (keys) => {
+    const list = navOrderListOf();
+    if (!list) return;
+    const items = new Map([...list.children].map((li) => [li.dataset.navOrderKey, li]));
+    const topsBefore = new Map();
+    items.forEach((li, key) => topsBefore.set(key, li.getBoundingClientRect().top));
+    keys.forEach((key, index) => {
+      const li = items.get(key);
+      if (!li) return;
+      list.appendChild(li);
+      const badge = li.querySelector(".nav-order-index");
+      if (badge) badge.textContent = String(index + 1);
+    });
+    // FLIP：记下搬家前的位置，搬完把差值用 transform 动画归零 ——
+    // 行与行的「挤让」过程看得见，不是瞬间跳到位。连续触发时取消上一段动画。
+    items.forEach((li, key) => {
+      const dy = (topsBefore.get(key) || 0) - li.getBoundingClientRect().top;
+      if (Math.abs(dy) < 1) return;
+      navFlipAnims.get(li)?.cancel();
+      if (!li.animate) return;
+      const anim = li.animate(
+        [{ transform: `translateY(${dy}px)` }, { transform: "none" }],
+        { duration: 160, easing: "cubic-bezier(0.2, 0.7, 0.3, 1)" }
+      );
+      navFlipAnims.set(li, anim);
+    });
+  };
+  const clearNavOrderDragMarks = () => {
+    navOrderDragKey = null;
+    document.querySelectorAll(".nav-order-item.is-dragging")
+      .forEach((node) => node.classList.remove("is-dragging"));
+  };
+  const navOrderItemOf = (event) => {
+    const list = navOrderListOf();
+    const item = event.target?.closest?.(".nav-order-item");
+    return item && list?.contains(item) ? item : null;
+  };
+  $("#settingsForm")?.addEventListener("dragstart", (event) => {
+    const item = navOrderItemOf(event);
+    if (!item) return;
+    navOrderDragKey = item.dataset.navOrderKey;
+    item.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", navOrderDragKey || "");
+  });
+  $("#settingsForm")?.addEventListener("dragover", (event) => {
+    if (!navOrderDragKey) return;
+    const list = navOrderListOf();
+    if (!list || !list.contains(event.target)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    // 指针贴近列表上/下边缘时自动续滚（列表 340px 高内部滚动），
+    // 否则第 1 行永远拖不到第 12 行 —— dragover 连续触发，每次挪一点就够。
+    const listRect = list.getBoundingClientRect();
+    if (event.clientY < listRect.top + 28) list.scrollTop -= 8;
+    else if (event.clientY > listRect.bottom - 28) list.scrollTop += 8;
+    // 指针在目标行上半截 = 插到它前面，下半截 = 后面。用行高的一半判，
+    // 不搞「前后各 25% 死区」—— 行只有 30px 高，死区会比操作区还大。
+    const item = navOrderItemOf(event);
+    if (!item || item.dataset.navOrderKey === navOrderDragKey) return;
+    const rect = item.getBoundingClientRect();
+    const after = event.clientY > rect.top + rect.height / 2;
+    moveNavOrderDom(reorderNavOrderKeys(navOrderDomKeys(), navOrderDragKey, item.dataset.navOrderKey, after));
+  });
+  $("#settingsForm")?.addEventListener("drop", (event) => {
+    if (!navOrderDragKey) return;
+    const list = navOrderListOf();
+    if (!list || !list.contains(event.target)) return;
+    event.preventDefault();
+    // 此刻 DOM 顺序就是用户看到的最终顺序：照抄进状态 + 左侧导航立刻重排 + 自动存库。
+    persistNavOrder(navOrderDomKeys());
+    clearNavOrderDragMarks();
+  });
+  // dragend 兜底：按 Esc 取消、拖到列表外松手都走这里 —— 恢复到状态里的顺序
+  // （取消场景）或与 drop 后的状态一致（成功场景，重建是幂等的空操作）。
+  // drop 成功后源节点已被重画替换，dragend 不一定触发，所以两边都调。
+  $("#settingsForm")?.addEventListener("dragend", () => {
+    if (!navOrderDragKey) return;
+    applyNavOrder(navOrderKeys());
+    clearNavOrderDragMarks();
+  });
   $("#settingsForm")?.addEventListener("input", (event) => {
     if (!event.target.name?.startsWith("sso_")) return;
     updateSsoModeFields();
@@ -8675,6 +9012,8 @@ function bindEvents() {
       closeForumDetailModal();
       closeSsoDiagnosticModal();
       closeShiftPopover();
+      closeEnvironmentEditor();
+      closeEnvironmentOccupyModal();
       // Esc 顺手把已经点开的密码收回去：明文留在屏幕上总是不好的。
       closeEnvironmentSecret();
       return;
@@ -8704,33 +9043,6 @@ function bindEvents() {
     if (envSecret && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       toggleEnvironmentSecret(envSecret);
-    }
-  });
-
-  document.body.addEventListener("pointerdown", (event) => {
-    const colResizer = event.target.closest?.("[data-col-resize]");
-    if (colResizer) {
-      beginLinkColumnResize(event, colResizer);
-    }
-  });
-
-  document.body.addEventListener("dblclick", (event) => {
-    if (event.target.closest?.("[data-col-resize]")) {
-      resetLinkColumnWidths();
-    }
-  });
-
-  document.body.addEventListener("keydown", (event) => {
-    const colResizer = event.target.closest?.("[data-col-resize]");
-    if (!colResizer) return;
-    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-      event.preventDefault();
-      nudgeLinkColumnWidth(colResizer, event.key === "ArrowLeft" ? -16 : 16);
-      return;
-    }
-    if (event.key === "Enter") {
-      event.preventDefault();
-      resetLinkColumnWidths();
     }
   });
 
@@ -9261,6 +9573,44 @@ function bindEvents() {
       return;
     }
     // 环境卡片上的操作一律走委托：卡片是整块重绘的，绑在节点上的监听器活不过下一次渲染。
+    const envCopy = event.target.closest("[data-env-copy]");
+    if (envCopy) {
+      copyEnvironmentValue(envCopy.dataset.envCopy)
+        .then((ok) => {
+          if (ok) toast("已复制");
+        })
+        .catch(() => toast("复制失败，请手动选中复制"));
+      return;
+    }
+    const envLchToggle = event.target.closest("[data-env-lch-toggle]");
+    if (envLchToggle) {
+      const body = document.getElementById(`env-lch-body-${envLchToggle.dataset.envLchToggle}`);
+      if (!body) return;
+      const expanded = body.classList.toggle("hidden");
+      envLchToggle.setAttribute("aria-expanded", expanded ? "false" : "true");
+      envLchToggle.querySelector(".env-lch-caret")?.replaceChildren(document.createTextNode(expanded ? "▸" : "▾"));
+      return;
+    }
+    const envLchAdd = event.target.closest("[data-env-lch-draft-add]");
+    if (envLchAdd) {
+      openEnvironmentLchDraft();
+      return;
+    }
+    const envLchDraftEdit = event.target.closest("[data-env-lch-draft-edit]");
+    if (envLchDraftEdit) {
+      openEnvironmentLchDraft(envLchDraftEdit.dataset.envLchDraftEdit);
+      return;
+    }
+    const envLchDraftCancel = event.target.closest("[data-env-lch-draft-cancel]");
+    if (envLchDraftCancel) {
+      closeEnvironmentLchDraft();
+      return;
+    }
+    const envLchManageDelete = event.target.closest("[data-env-lch-manage-delete]");
+    if (envLchManageDelete) {
+      deleteEnvironmentLch(Number(envLchManageDelete.dataset.envLchManageDelete)).catch((error) => toast(error.message));
+      return;
+    }
     const envSecret = event.target.closest("[data-env-reveal]");
     if (envSecret) {
       toggleEnvironmentSecret(envSecret);
@@ -9853,6 +10203,7 @@ function bindEvents() {
     const minuteForm = event.target.closest(".minute-form");
     const presetForm = event.target.closest(".preset-form");
     const linkQualityForm = event.target.closest(".link-quality-form");
+    const envLchDraftForm = event.target.closest(".env-lch-draft");
     const linkEditForm = event.target.closest("#linkEditForm");
     const chatReplyForm = event.target.closest(".chat-reply-form");
     const morningItemForm = event.target.closest(".morning-item-form");
@@ -9860,8 +10211,18 @@ function bindEvents() {
     const permissionForm = event.target.closest(".user-type-permission-form");
     const passwordForm = event.target.closest("#passwordForm");
     const scoreEditForm = event.target.closest(".score-edit-form");
-    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !linkEditForm && !chatReplyForm && !morningItemForm && !personalMorningForm && !permissionForm && !passwordForm && !scoreEditForm) return;
+    if (!postForm && !avatarForm && !profileForm && !userEditForm && !topicForm && !meetingTopicScopeForm && !minuteForm && !presetForm && !linkQualityForm && !linkEditForm && !chatReplyForm && !morningItemForm && !personalMorningForm && !permissionForm && !passwordForm && !scoreEditForm && !envLchDraftForm) return;
     event.preventDefault();
+    // 下位机草稿单独走一条路：它要的是「保存这一条 + 局部重绘」，共用尾部那次
+    // refreshAll() 会把整个页面数据重拉一遍，弹窗里的焦点和滚动位置全丢。
+    if (envLchDraftForm) {
+      const data = formData(envLchDraftForm);
+      const payload = { host: data.host, username: data.username };
+      // 留空 = 不改密码（表单不回填），空值压根不发，否则一次普通改名就把密码清了。
+      if (data.password) payload.password = data.password;
+      submitEnvironmentLchDraft(payload).catch((error) => toast(error.message));
+      return;
+    }
     try {
       if (passwordForm) {
         const data = fullFormData(passwordForm);

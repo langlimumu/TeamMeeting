@@ -25,6 +25,7 @@ class SystemHandlerMixin:
             "team_moment": "团队时刻",
             "norm": "规范条目",
             "environment": "环境",
+            "environment_lch": "下位机",
         }
         for item in items:
             item["entity_label"] = labels.get(item["entity_type"], item["entity_type"])
@@ -68,6 +69,25 @@ class SystemHandlerMixin:
                 # 挂回去等于凭空冒出一段没人确认过的占用。历史在 environment_usages 里，不会丢。
                 conn.execute(
                     "UPDATE environments SET deleted_at=NULL, deleted_by=NULL, current_user_id=NULL, occupied_at=NULL, expected_return_at=NULL, occupancy_note=NULL WHERE id=?",
+                    (item["entity_id"],),
+                )
+                # 下位机跟着父机一起回来：删除时它们是被级联软删的（没单独进回收站），
+                # 所以这里必须把它们也复活，否则恢复出来的主机是空的。
+                conn.execute(
+                    "UPDATE environment_lch SET deleted_at=NULL, deleted_by=NULL WHERE environment_id=?",
+                    (item["entity_id"],),
+                )
+            elif entity_type == "environment_lch":
+                # 单删的下位机也要确认父环境还在，否则会变成「孤儿下位机」——
+                # 读的时候按父机分组，它不会出现在任何卡片上，等于凭空丢了。
+                parent = conn.execute(
+                    "SELECT id, deleted_at FROM environments WHERE id=?",
+                    (payload.get("environment_id"),),
+                ).fetchone()
+                if not parent or parent["deleted_at"]:
+                    raise AppError(409, "该下位机所属的环境已被删除，请先恢复环境")
+                conn.execute(
+                    "UPDATE environment_lch SET deleted_at=NULL, deleted_by=NULL WHERE id=?",
                     (item["entity_id"],),
                 )
             elif entity_type == "user":
@@ -503,6 +523,7 @@ class SystemHandlerMixin:
         keys = (
             "app_brand_name",
             "app_team_name",
+            "nav_order",
             "red_black_show_black_points",
             "red_black_show_black_details",
             "sso_enabled",
@@ -664,6 +685,18 @@ class SystemHandlerMixin:
                     validate_sso_url(normalized, labels[key])
                 if key == "sso_mode" and normalized not in ("discovery", "manual"):
                     raise AppError(400, "OAuth2 配置方式不正确")
+                if key == "nav_order":
+                    # 只接受已知的模块 key，并把重复项去掉。存一份脏值会让前端
+                    # 排序时静默丢模块 —— 不如当场报错，让管理员改对。
+                    seen = []
+                    for token in (part.strip() for part in normalized.split(",")):
+                        if not token:
+                            continue
+                        if token not in MODULE_KEYS and token not in NAV_SYSTEM_KEYS:
+                            raise AppError(400, f"导航顺序里有未知模块：{token}")
+                        if token not in seen:
+                            seen.append(token)
+                    normalized = ",".join(seen)
                 if key == "sso_default_user_type":
                     normalized = GUEST_USER_TYPE_KEY
                 conn.execute(

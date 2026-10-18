@@ -1066,6 +1066,18 @@ body.modal-open {
   margin-top: 4px;
 }
 
+/* 环境弹窗里嵌了下位机管理区之后内容会超过一屏，保存按钮不能跟着滚上去 ——
+   否则用户在下位机表单里填完，主操作按钮在视口外，得先翻才看得到。
+   做成贴底的吸底条：负边距把卡片的内边距盖住，背景同色看不出接缝。 */
+.environment-modal-card .modal-actions {
+  position: sticky;
+  bottom: 0;
+  margin: 10px -18px -18px;
+  padding: 12px 18px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 228px 1fr;
@@ -5762,136 +5774,163 @@ th {
   word-break: break-all;
 }
 
+/* 分类块并排铺开（auto-fill 自适应列数，块窄屏自动换行）：每个分类是一个
+   带边框的小面板，同类收在一个框里，跨类扫视就是横向移动视线（用户草图）。
+   align-items:start —— 各块高度随内容，不被最高的块拉成等高空白。
+   顶边 3px 色条跟环境管理卡片一个思路：颜色即分类，扫一眼就知道块边界。 */
+.link-wall {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.link-block {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+}
+
+/* 分类色五色轮换（按块序取模）：色相够开、挨着的块不会撞色；
+   标题同色，色条+标题两点呼应，「这是第几类」读起来更清楚。 */
+.link-block.tone-1 { border-top-color: var(--blue); }
+.link-block.tone-1 .link-block-title { color: var(--blue); }
+.link-block.tone-2 { border-top-color: var(--green); }
+.link-block.tone-2 .link-block-title { color: var(--green); }
+.link-block.tone-3 { border-top-color: var(--orange); }
+.link-block.tone-3 .link-block-title { color: var(--orange); }
+.link-block.tone-4 { border-top-color: var(--purple); }
+.link-block.tone-4 .link-block-title { color: var(--purple); }
+/* 没有现成的 teal 变量：取一个暗青，浅底上对比度够（标题 13px 也要能读）。 */
+.link-block.tone-5 { border-top-color: #0f9b8e; }
+.link-block.tone-5 .link-block-title { color: #0f9b8e; }
+
+/* 分类头：一条下划线把「这是什么类」和「这一类有哪些」分开 —— 用户草图就是这样，
+   比再加一层背景块轻，也不跟 chip 抢注意力。 */
+.link-block-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--ink);
+}
+
+.link-block-count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* chip 流：flex-wrap，一行放几个由名字宽度决定，不强制等分列 ——
+   链接名长短差太多，等宽网格会留下一堆补不齐的空白。 */
+.link-block-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* chip-item 本身就是「框」：链接文案 + ⋯ 钮并在同一个框里（用户要求）。
+   框带边框和底色，hover 整框亮蓝边 —— 可点的暗示给在框上，不只是文字。 */
+.link-chip-item {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  transition: border-color 0.15s ease;
+}
+
+.link-chip-item:hover {
+  border-color: var(--blue);
+}
+
+/* 失效链接：虚线框 + 降透明度，名字不给 href（点了也没用）。
+   hover 不变色 —— 不可点的东西不该给「可点」的暗示。 */
+.link-chip-item.is-invalid {
+  border-style: dashed;
+  opacity: 0.65;
+}
+
+.link-chip-item.is-invalid:hover {
+  border-color: var(--line);
+}
+
+/* chip = 框里的文案区：名字是唯一主角，点它跳转。自己不再带边框底色
+   （那是框的），右边距收窄给 ⋯ 钮让位。 */
+.link-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 4px 5px 10px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.35;
+  text-decoration: none;
+}
+
+.link-chip:hover {
+  color: var(--blue);
+}
+
+/* 没有 ⋯ 钮时（无编辑权）右边距补回正常呼吸感。 */
+.link-chip-item.is-bare .link-chip {
+  padding-right: 10px;
+}
+
+/* 失效链接文案：不可点、灰字。 */
+.link-chip.disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.link-chip.disabled:hover {
+  color: var(--muted);
+}
+
+/* 长名字截断，全名在 title 提示里（url · 描述 · 次数）。 */
+.link-chip-title {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 置顶/失效是 chip 里的小角标：不单独占一行，也不放大到 pill 那么吵。 */
+.link-chip-flag {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.link-chip-flag.warn {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--red);
+}
+
 .link-toolbar {
   display: grid;
   grid-template-columns: 150px 130px minmax(220px, 1fr);
   gap: 8px;
   min-width: min(460px, 100%);
-}
-
-.link-list-table {
-  table-layout: fixed;
-  min-width: 820px;
-}
-
-.link-list-table.has-manage {
-  min-width: 1160px;
-}
-
-.link-list-table th:nth-child(1) {
-  width: 20%;
-}
-
-.link-list-table th:nth-child(2) {
-  width: 28%;
-}
-
-.link-list-table th:nth-child(3) {
-  width: 42%;
-}
-
-.link-list-table th:nth-child(4) {
-  width: 10%;
-}
-
-.link-list-table.has-manage th:nth-child(1) {
-  width: 16%;
-}
-
-.link-list-table.has-manage th:nth-child(2) {
-  width: 22%;
-}
-
-.link-list-table.has-manage th:nth-child(3) {
-  width: 32%;
-}
-
-.link-list-table.has-manage th:nth-child(4) {
-  width: 8%;
-}
-
-.link-list-table.has-manage th:nth-child(5) {
-  width: 360px;
-}
-
-.link-list-table th[data-col-key] {
-  position: relative;
-}
-
-.link-col-resizer {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 9px;
-  height: 100%;
-  cursor: col-resize;
-  touch-action: none;
-  z-index: 2;
-}
-
-.link-col-resizer::after {
-  content: "";
-  position: absolute;
-  top: 22%;
-  left: 50%;
-  width: 2px;
-  height: 56%;
-  transform: translateX(-50%);
-  border-radius: 1px;
-  background: transparent;
-  transition: background 0.15s ease;
-}
-
-.link-col-resizer:hover::after,
-.link-col-resizer.is-active::after,
-.link-col-resizer:focus-visible::after {
-  background: var(--blue);
-}
-
-.link-col-resizer:focus-visible {
-  outline: none;
-}
-
-body.link-column-resizing {
-  cursor: col-resize;
-  user-select: none;
-}
-
-.link-list-table td,
-.link-list-table th {
-  vertical-align: middle;
-}
-
-.link-single-line,
-.link-scope-tags {
-  min-width: 0;
-  max-width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.link-name-line strong,
-.link-description,
-.link-empty {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.link-description {
-  color: var(--muted);
-}
-
-.link-scope-tags .tag {
-  flex: 0 1 auto;
-  max-width: 96px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .link-url {
@@ -5907,39 +5946,6 @@ body.link-column-resizing {
 .link-url.disabled {
   color: var(--subtle);
   text-decoration: line-through;
-}
-
-.link-invalid {
-  background: #fffaf7;
-}
-
-.link-quality-form {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 520px;
-}
-
-.link-quality-form select {
-  flex: 0 0 86px;
-}
-
-.link-quality-form input {
-  min-width: 0;
-}
-
-.link-quality-form input[name="machine_scope"],
-.link-quality-form input[name="process_tags"] {
-  flex: 1 1 100px;
-}
-
-.link-quality-form input[name="quality_note"] {
-  flex: 1.2 1 130px;
-}
-
-.link-quality-form button {
-  flex: 0 0 58px;
-  padding-inline: 10px;
 }
 
 .permission-list {
@@ -8526,7 +8532,18 @@ body[data-theme="miro"] #memberList .tag {
   margin-bottom: 8px;
 }
 
-.link-action-menu-toggle {
+/* chip 框里的 wrap：框已经给了所有间距，wrap 自己别再加 —— 否则 ⋯ 钮
+   在框里悬空、框的高度也被撑歪。 */
+.link-chip-item .link-action-menu-wrap {
+  flex: none;
+  margin-bottom: 0;
+}
+
+/* ⋯ 菜单钮。必须**成对**写主题覆盖：miro/dingtalk 主题里有
+   `body[data-theme="miro"] button`（0,1,2），特异性高于单个类选择器 (0,1,0)，
+   不成对写的话这两个主题下会变蓝药丸。 */
+.link-action-menu-toggle,
+body[data-theme] .link-action-menu-toggle {
   width: 32px;
   min-height: 30px;
   padding: 0;
@@ -8538,9 +8555,35 @@ body[data-theme="miro"] #memberList .tag {
 }
 
 .link-action-menu-toggle:hover,
-.link-action-menu-toggle[aria-expanded="true"] {
+body[data-theme] .link-action-menu-toggle:hover,
+.link-action-menu-toggle[aria-expanded="true"],
+body[data-theme] .link-action-menu-toggle[aria-expanded="true"] {
   border-color: var(--blue);
   background: #eef4ff;
+  color: var(--blue);
+}
+
+/* chip 框里的 ⋯：与文案同框，左缘一条分隔线当「按钮区」的分界，
+   右端接框的圆角。hover 只亮按钮区自己的底，不再描边（框已经描了）。 */
+.link-chip-item .link-action-menu-toggle,
+body[data-theme] .link-chip-item .link-action-menu-toggle {
+  width: 26px;
+  min-height: 26px;
+  margin-left: 2px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0 8px 8px 0;
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.link-chip-item .link-action-menu-toggle:hover,
+body[data-theme] .link-chip-item .link-action-menu-toggle:hover,
+.link-chip-item .link-action-menu-toggle[aria-expanded="true"],
+body[data-theme] .link-chip-item .link-action-menu-toggle[aria-expanded="true"] {
+  border-color: var(--line);
+  background: var(--panel-soft);
   color: var(--blue);
 }
 
@@ -8562,6 +8605,19 @@ body[data-theme="miro"] #memberList .tag {
   display: none;
 }
 
+/* 下方空间不够时向上展开（由 toggleLinkActionMenu 按剩余高度加类）。 */
+.link-action-menu.opens-up {
+  top: auto;
+  bottom: calc(100% + 4px);
+}
+
+/* 水平翻转：菜单默认右对齐贴着 ⋯ 钮，chip 墙第一个 chip 可能就在页面最左，
+   菜单往左展开会被视口左边切掉一截。JS 量到 left<0 时加这个类改成左对齐。 */
+.link-action-menu.opens-left {
+  left: 0;
+  right: auto;
+}
+
 .link-action-menu button {
   width: 100%;
   min-height: 32px;
@@ -8580,15 +8636,41 @@ body[data-theme="miro"] #memberList .tag {
   color: var(--red);
 }
 
-.link-pinned-pill {
-  background: #fff4e5;
-  border-color: #fed7aa;
-  color: #b54708;
+/* 管理员的质量设置表单放在菜单里（不再塞进每张卡片——卡片只有 240px 宽，
+   一个 min-width 520px 的表单进去必然把卡片撑爆）。菜单因此要加宽。 */
+.link-action-menu.has-quality {
+  min-width: 230px;
 }
 
-.link-scope-tags .link-tag {
-  border-color: transparent;
-  font-weight: 600;
+.link-menu-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--line);
+}
+
+.link-action-menu .link-quality-form {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 6px 6px;
+}
+
+.link-action-menu .link-quality-form select,
+.link-action-menu .link-quality-form input {
+  width: 100%;
+  flex: none;
+  min-height: 30px;
+  font-size: 12px;
+}
+
+.link-action-menu .link-quality-form button {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--blue);
+  color: #fff;
+  text-align: center;
 }
 
 .link-tag.tone-1 { background: #eef4ff; color: #245bdb; }
@@ -9127,15 +9209,6 @@ body[data-theme="miro"] #memberList .tag {
 
   .donation-received {
     justify-content: center;
-  }
-
-  .link-list-table,
-  .link-list-table.has-manage {
-    min-width: 760px;
-  }
-
-  .link-quality-form {
-    min-width: 640px;
   }
 
   .modal-card {
@@ -12849,15 +12922,27 @@ body[data-theme] .env-filters button.is-active {
   padding: 10px;
 }
 
+/* 一行字段 = 「标签」一行 + 「值 + 复制按钮」一行。值和按钮必须放在同一个
+   .env-field-line（flex + align-items:center）里：之前用两列 grid + baseline
+   对齐，SVG 按钮没有文字基线，图标整个掉到值的右下方，看着不像同一排。
+   值 min-width:0 + overflow-wrap: anywhere —— 长 IP/密码在窄卡片里自己换行，
+   按钮 flex:none 永远紧跟在值后面，不会被挤走或单独占一行。 */
 .env-field {
-  display: grid;
-  gap: 2px;
+  display: block;
   min-width: 0;
 }
 
 .env-field-label {
+  display: block;
   color: var(--muted);
   font-size: 11px;
+}
+
+.env-field-line {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
 }
 
 /* 凭据用等宽字体：一串随机字符用比例字体不好逐字核对。 */
@@ -12865,6 +12950,7 @@ body[data-theme] .env-filters button.is-active {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 /* 密码默认打码（●●●●●●）。点一下在本地展开：明文不进 DOM 属性、也不保存，
@@ -13009,6 +13095,322 @@ body[data-theme] .env-delete-btn:hover {
   gap: 4px 12px;
   color: var(--muted);
   font-size: 12px;
+}
+
+/* 导航顺序编辑器：**一列竖排**。顺序是一条纵向的链，竖排才读得出来；
+   做成网格时模块数不整除列数会 ragged（长短行交错），反而更难对照左侧栏。
+   每行 = 拖拽把手 + 序号徽标 + 模块名，行与行之间一条分隔线。
+   调序只靠整行拖拽，行首把手（两列圆点）是视觉提示。 */
+.nav-order-field {
+  grid-column: 1 / -1;
+}
+
+.nav-order-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+/* 「恢复默认」是文字按钮：这里用 command 式的弱按钮，不抢保存按钮的戏。 */
+.nav-order-reset,
+body[data-theme] .nav-order-reset {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.nav-order-reset:hover,
+body[data-theme] .nav-order-reset:hover {
+  color: var(--ink);
+  background: var(--panel-soft);
+}
+
+.nav-order-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.nav-order-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: grab;
+}
+
+/* 行分隔线画在下边框上（最后一行不画），比 gap + 背景更齐整。 */
+.nav-order-item + .nav-order-item {
+  border-top: 1px solid var(--line);
+}
+
+.nav-order-item:hover {
+  background: var(--panel-soft);
+}
+
+/* 拖拽调序（实时重排）：被拖的行半透明 + grab 光标；行序与序号在拖动过程中
+   就实时变化（moveNavOrderDom 搬节点），没有「松手才生效」的落点线。 */
+.nav-order-item.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.nav-order-index {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.nav-order-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+}
+
+/* 拖拽把手：行首两列圆点，比文字图标更「能抓」；颜色压灰不抢模块名。
+   把手是 <svg> 不是 <button>，不踩裸 button 主题规则，无需成对写覆盖。 */
+.nav-order-handle {
+  flex: none;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  cursor: grab;
+}
+
+.nav-order-item:hover .nav-order-handle {
+  color: var(--ink);
+}
+
+.nav-order-item:active .nav-order-handle {
+  cursor: grabbing;
+}
+
+/* 下位机（LCH）块：折叠在卡片里。默认收起 —— 一台服务器挂十几台下位机时全展开
+   会把卡片撑得没法看，而大多数人只关心父机。 */
+.env-lch {
+  margin-top: 8px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+
+/* 这两条都是**裸 <button>**：主题的 `body[data-theme] button` 是 (0,1,2)，光写组件类
+   (0,1,0) 会被盖成蓝药丸 —— 所以基础规则本身就要成对写，不是只在 :hover 里补。 */
+.env-lch-toggle,
+body[data-theme] .env-lch-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* 裸 <button>：成对写主题覆盖，否则在 miro/dingtalk 下会变成蓝药丸。 */
+.env-lch-toggle:hover,
+body[data-theme] .env-lch-toggle:hover {
+  background: var(--panel-soft);
+  color: var(--ink);
+}
+
+.env-lch-caret {
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.env-lch-body {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.env-lch-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.env-lch-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+
+.env-lch-empty,
+.env-lch-manage-empty {
+  margin: 0;
+  padding: 6px 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 复制按钮：图标 glyph 紧贴值，按钮本身零内边距零外边距 —— 中间留一丝白
+   都会被读成「值和图标是两样东西」，引起「这图标是干什么的」的歧义。
+   图标是内联 SVG（两个叠放的圆角矩形）：⧉ 那个字符渲染出来是方框套方框，
+   小尺寸下像一团莫名其妙的框。display:block 让按钮盒子正好包住图标。 */
+.env-copy-icon {
+  display: block;
+}
+
+.env-copy-btn,
+body[data-theme] .env-copy-btn {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 0;
+  margin-left: 0;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  /* 图标是 SVG 没有文字基线：在 flex 行里靠 align-items:center 已经居中，
+     这里 align-self 保底，行高仍由文字决定。 */
+  align-self: center;
+}
+
+.env-copy-btn:hover,
+body[data-theme] .env-copy-btn:hover {
+  border-color: var(--line);
+  background: var(--panel-soft);
+  color: var(--ink);
+}
+
+/* ===== 环境编辑弹窗里的下位机管理区 =====
+   跟改环境信息在同一个弹窗：一台机器「本身是什么」和「下面挂什么」是一件事。
+   每条保存都是即时请求，所以没有「一起提交」的暂存区，也不需要。 */
+.env-lch-manage {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.env-lch-manage-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.env-lch-manage-head h3 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.env-lch-manage-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.env-lch-manage-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.env-lch-manage-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  min-width: 0;
+  flex: 1 1 240px;
+}
+
+.env-lch-manage-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+}
+
+.env-lch-manage-actions button,
+body[data-theme] .env-lch-manage-actions button {
+  min-height: 28px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+/* 草稿表单：添加 / 编辑共用一张，嵌在列表下方，不另起弹窗。 */
+.env-lch-draft {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.env-lch-draft label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.env-lch-draft-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.env-lch-draft-actions button,
+body[data-theme] .env-lch-draft-actions button {
+  min-height: 30px;
+  padding: 4px 14px;
+  font-size: 12px;
+}
+
+@media (max-width: 720px) {
+  .env-lch-draft {
+    grid-template-columns: 1fr;
+  }
+}
+
+.env-card-title h3,
+.env-host {
+  display: flex;
+  align-items: center;
 }
 
 .env-usage-note {

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>技术项目团队周例会</title>
-    <link rel="stylesheet" href="/style.css?v=20260817-team-scope-v1" />
+    <link rel="stylesheet" href="/style.css?v=20261018-env-nav-links-v4" />
   </head>
   <body>
     <div class="app-shell">
@@ -500,12 +500,17 @@
                 <label>登录账号<input name="username" placeholder="如：team" maxlength="60" required /></label>
                 <label>登录密码<input name="password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" placeholder="登录密码（选填）" /></label>
                 <label>VNC 端口<input name="vnc_port" type="number" min="1" max="65535" placeholder="如：5901" /></label>
+                <label>VNC 密码<input name="vnc_password" type="password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" placeholder="VNC 密码（选填，与登录密码无关时填这里）" /></label>
                 <label>用途备注<input name="purpose" placeholder="用途或注意事项（选填）" maxlength="200" /></label>
-                <div class="modal-actions">
-                  <button class="secondary" type="button" data-environment-modal-close>取消</button>
-                  <button id="environmentSubmitBtn" type="submit">创建环境</button>
-                </div>
               </form>
+              <!-- 下位机挂在环境编辑里：改环境和加下位机是同一件事的两个部分，
+                   分成「卡片一个按钮 + 又一个弹窗」两处入口太散。保存按钮在表单外，
+                   用 form 属性指回 #environmentForm，所以仍在整个弹窗的最底部。 -->
+              <section class="env-lch-manage hidden" id="environmentLchSection" aria-label="下位机"></section>
+              <div class="modal-actions">
+                <button class="secondary" type="button" data-environment-modal-close>取消</button>
+                <button id="environmentSubmitBtn" type="submit" form="environmentForm">创建环境</button>
+              </div>
             </div>
           </div>
 
@@ -1438,7 +1443,7 @@
                   <input id="linkKeywordSearch" placeholder="搜索名称、地址、说明、机台、流程" />
                 </div>
               </div>
-              <div id="linkList" class="table"></div>
+              <div id="linkList"></div>
             </section>
           </section>
 
@@ -1575,6 +1580,6 @@
         </section>
       </main>
     </div>
-    <script type="module" src="/app.js?v=20260817-team-scope-v1"></script>
+    <script type="module" src="/app.js?v=20261018-env-nav-links-v4"></script>
   </body>
 </html>

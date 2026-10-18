@@ -57,6 +57,10 @@ SSO_DISCOVERY_CACHE_SECONDS = _env_int("TEAM_LOOP_SSO_DISCOVERY_CACHE_SECONDS", 
 DEFAULT_SETTINGS = [
     ("app_brand_name", "系统名称", "Team Loop", "text", "左侧顶部显示的系统名称"),
     ("app_team_name", "团队名称", "技术项目团队", "text", "左侧顶部显示的团队名称"),
+    # 左侧导航顺序，逗号分隔的模块 key。留空 = 用前端 pages 的默认顺序。
+    # 前端会把**没出现在这个列表里的模块按默认顺序追加在后面**，所以以后加新模块
+    # 不会因为漏配而从导航里消失。
+    ("nav_order", "左侧导航顺序", "", "text", "逗号分隔的模块 key，决定左侧导航栏的排列顺序；留空用默认顺序。在下方列表里按住行首把手拖动即可调整"),
     ("meeting_default_title", "默认会议标题", "周例会", "text", "创建会议和批量生成时使用的默认标题"),
     ("meeting_bulk_default_weeks", "批量生成周数", "4", "number", "会议沙盘批量生成默认覆盖的周数"),
     ("shift_default_hours", "默认班次小时", "12", "number", "新增排班时默认计入的工时"),
@@ -145,6 +149,10 @@ MODULE_CATALOG = [
     {"key": "environments", "name": "环境管理", "description": "服务器连接信息与占用交接，一台一张卡片"},
 ]
 MODULE_KEYS = {item["key"] for item in MODULE_CATALOG}
+# 左侧导航除了业务模块，还有两个系统页（用户管理 / 系统管理）。它们没有权限行、
+# 不进 MODULE_CATALOG，但 nav_order 排的是整条导航，校验必须放行这两个 key，
+# 否则前端提交完整顺序时永远 400「导航顺序里有未知模块」。
+NAV_SYSTEM_KEYS = {"users", "system"}
 PERMISSION_ACTIONS = ("view", "create", "edit", "delete")
 PARTICIPATION_SCOPES = {
     "members": ("include_in_members", "团队成员"),

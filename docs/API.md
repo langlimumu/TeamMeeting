@@ -217,13 +217,16 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET/POST | `/api/links` | 查询或归档链接 |
-| PATCH/DELETE | `/api/links/{id}` | 修改或软删除链接 |
+| PATCH/DELETE | `/api/links/{id}` | 修改或软删除链接；`PATCH` 也负责置顶、失效、适用机台、流程标签与质量备注（管理员视图下卡片上那排小控件走的就是它） |
+| GET | `/api/links/{id}/open` | 记一次点击后 302 跳转到目标地址。**卡片的跳转入口走这里而不是直接指向 URL**，就是为了这个计数 |
 | GET/POST | `/api/link-categories` | 链接分类 |
 | GET/POST | `/api/environments` | 环境台账列表（每项带当前占用与使用人）或新增环境；响应另含 `summary` 汇总 |
 | PATCH/DELETE | `/api/environments/{id}` | 管理员修改环境连接信息，或软删除环境（有人占用时 409） |
 | GET | `/api/environments/{id}` | 单台环境 + 它的全部占用记录 `usages` |
 | POST | `/api/environments/{id}/occupy` | 当前用户占用一台**空闲**环境；`expected_return_at` 收日期或完整时刻（`2026-10-15T18:30:45`），一律归一化成 ISO 时刻；已被他人占用时返回 409 |
 | POST | `/api/environments/{id}/release` | 释放占用；只能释放自己占的，管理员可代为释放 |
+| POST | `/api/environments/{id}/lch` | 为环境新增一台下位机（仅管理员） |
+| PATCH/DELETE | `/api/environment-lch/{id}` | 修改或软删除下位机（仅管理员） |
 | GET | `/api/reminders` | 当前用户提醒 |
 | PATCH | `/api/reminders/read` | 标记提醒已读 |
 | GET | `/api/recycle-bin` | 回收站 |
@@ -252,6 +255,12 @@ SSO 回调成功后跳转到账号当前所属组织，例如 `/org/ess/mo/ws?ss
 环境台账把「服务器在哪、谁能用、现在谁在用」放在同一个对象上，UI 是一台一张卡片而不是列表表格——找人找空闲机器时，横向扫比上下翻快。
 
 **两张表，职责严格分开**：`environments` 是**当前状态**（连接信息 + `current_user_id` 这一行的占用者），`environment_usages` 是**历史**（每一次占用一段）。释放的动作在同一个事务里做两件事——把当前这段 `environment_usages` 写上 `released_at`，同时清空 `environments` 上的占用字段；占用则反过来，插入新的一段并写上 `current_user_id`。所以每台被占用的机器**有且只有一段 open 记录**，不可能出现两个人在用、或一条永远 open 的记录。
+
+**下位机（LCH）挂在一张独立的 `environment_lch` 表上，只有 IP / 账号 / 密码三样**，并且**没有 `current_user_id`**——占用单位**永远是父服务器**。这是刻意的：一旦允许单独占用，就得回答「父机被 A 占着、下位机被 B 占着算什么意思」，那种组合没人说得清，而且会出现「谁在用这台机器」有两个答案。子级没有占用入口（路由里就没有 `occupy` / `release`），父机的占用状态对下面所有下位机一体生效。写操作与台账同权（仅管理员），读凭据则跟着模块的 `view` 走。
+
+删环境会**级联软删**下位机，但下位机**不单独进回收站**——父机恢复时它们一起回来，否则会出现「主机不在、孤儿下位机还在」的数据。单删的下位机才进回收站，且恢复前会确认父环境还在。
+
+⚠️ **VNC 密码是独立的一列**（`vnc_password`），留空表示「不单独设」，与系统登录密码同一个。它必须独立：现实里 VNC 密码通常由 `vncpasswd` 单独设置、上限 8 位，跟系统登录密码经常不是一个东西，只留一列的话同事照着连不上。口径与 `password` 一致：**不发这个字段 = 不改，显式发空串 = 清空**（前端表单留空时压根不发，所以「留空不改」由前端保证；后端保留「显式清空」的能力，否则永远没法把某台机器的密码删掉）。
 
 | 操作 | 谁可以 | 拦截点 |
 | --- | --- | --- |
